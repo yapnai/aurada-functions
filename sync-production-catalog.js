@@ -7,39 +7,11 @@ const { SquareClient, SquareEnvironment } = require('square');
 AWS.config.update({ region: 'us-east-1' });
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
-// Function to create clientMenu table
-async function createClientMenuTable() {
-  const dynamodbService = new AWS.DynamoDB();
-  
-  const params = {
-    TableName: 'clientMenu',
-    KeySchema: [
-      { AttributeName: 'restaurantName', KeyType: 'HASH' },  // Partition key
-      { AttributeName: 'locationID', KeyType: 'RANGE' }       // Sort key
-    ],
-    AttributeDefinitions: [
-      { AttributeName: 'restaurantName', AttributeType: 'S' },
-      { AttributeName: 'locationID', AttributeType: 'S' }
-    ],
-    BillingMode: 'PAY_PER_REQUEST'
-  };
+// Table names - HARDCODED FOR DEV
+const CLIENT_MENU_TABLE = 'clientMenu-dev';
+const MERCHANTS_TABLE = 'square-merchants';
 
-  try {
-    await dynamodbService.createTable(params).promise();
-    console.log('✅ clientMenu table created successfully');
-    
-    // Wait for table to be active
-    await dynamodbService.waitFor('tableExists', { TableName: 'clientMenu' }).promise();
-    console.log('✅ clientMenu table is now active');
-  } catch (error) {
-    if (error.code === 'ResourceInUseException') {
-      console.log('📋 clientMenu table already exists');
-    } else {
-      console.error('❌ Error creating table:', error);
-      throw error;
-    }
-  }
-}
+// Table is managed by CloudFormation, no need to create it here
 
 // Function to convert BigInt values to Numbers recursively
 function convertBigIntToNumber(obj) {
@@ -70,23 +42,23 @@ async function syncProductionCatalog(restaurantId = 'redbird-prod') {
   try {
     console.log('🚀 Starting production catalog sync...');
     
-    // 1. Create table if needed
-    await createClientMenuTable();
+    // 1. Using existing table created by CloudFormation
+    console.log(`📋 Using table: ${CLIENT_MENU_TABLE}`);
     
     // 2. Get credentials from square-merchants table
     console.log(`📊 Retrieving credentials for restaurant: ${restaurantId}`);
     
     const params = {
-      TableName: 'square-merchants',
+      TableName: MERCHANTS_TABLE,
       Key: {
-        restaurant_id: restaurantId
+        PK: restaurantId
       }
     };
     
     const result = await dynamodb.get(params).promise();
     
     if (!result.Item) {
-      throw new Error(`Restaurant credentials not found in square-merchants table. Restaurant ID: ${restaurantId}`);
+      throw new Error(`Restaurant credentials not found in square-merchants table. PK: ${restaurantId}`);
     }
     
     const merchantData = result.Item;
@@ -342,7 +314,7 @@ async function syncProductionCatalog(restaurantId = 'redbird-prod') {
         };
         
         const params = {
-          TableName: 'clientMenu',
+          TableName: CLIENT_MENU_TABLE,
           Item: dbItem
         };
         
@@ -369,4 +341,4 @@ async function syncProductionCatalog(restaurantId = 'redbird-prod') {
 }
 
 // Run the sync (you can pass a different restaurantId if needed)
-syncProductionCatalog(); // Uses default 'redbird-prod' 
+syncProductionCatalog('The Red Bird Hot Chicken & Fries'); 

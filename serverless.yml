@@ -4,44 +4,53 @@ provider:
   name: aws
   runtime: nodejs20.x
   region: us-east-1
+  stage: ${opt:stage, 'dev'}
   environment:
     TEXTBELT_API_KEY: ${env:TEXTBELT_API_KEY, 'textbelt'}
     SQUARE_ENVIRONMENT: ${env:SQUARE_ENVIRONMENT, 'production'}
-    CATALOG_TABLE_NAME: ${env:CATALOG_TABLE_NAME, 'restaurant-catalog'}
-    OAUTH_STATE_TABLE: ${env:OAUTH_STATE_TABLE, 'square-oauth-state'}
+    # Stage-specific tables
+    YAPN_ANALYTICS_TABLE: ${env:YAPN_ANALYTICS_TABLE, 'yapn-analytics-${self:provider.stage}'}
+    CLIENT_MENU_TABLE: ${env:CLIENT_MENU_TABLE, 'clientMenu-${self:provider.stage}'}
+    SESSION_CARTS_TABLE: ${env:SESSION_CARTS_TABLE, 'session-carts-${self:provider.stage}'}
+    # Shared tables (no stage suffix)
+    PHONE_NUMBER_CLIENT_MAP_TABLE: ${env:PHONE_NUMBER_CLIENT_MAP_TABLE, 'phoneNumberClientMap'}
+    CLIENT_DATABASE_TABLE: ${env:CLIENT_DATABASE_TABLE, 'clientDatabase'}
     MERCHANTS_TABLE: ${env:MERCHANTS_TABLE, 'square-merchants'}
+    OAUTH_STATE_TABLE: ${env:OAUTH_STATE_TABLE, 'square-oauth-state'}
   iam:
     role:
       statements:
+        # Stage-specific table permissions
         - Effect: Allow
           Action:
             - dynamodb:UpdateItem
             - dynamodb:GetItem
             - dynamodb:PutItem
           Resource:
-            - arn:aws:dynamodb:${self:provider.region}:*:table/yapn-analytics
+            - arn:aws:dynamodb:${self:provider.region}:*:table/yapn-analytics-${self:provider.stage}
         - Effect: Allow
           Action:
-            - dynamodb:Query
-            - dynamodb:PutItem
             - dynamodb:GetItem
+            - dynamodb:PutItem
             - dynamodb:UpdateItem
             - dynamodb:DeleteItem
           Resource:
-            - arn:aws:dynamodb:${self:provider.region}:*:table/restaurant-catalog
+            - arn:aws:dynamodb:${self:provider.region}:*:table/clientMenu-${self:provider.stage}
         - Effect: Allow
           Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/session-carts-${self:provider.stage}
+        # Shared table permissions
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:DeleteItem
             - dynamodb:Scan
-            - dynamodb:Query
-            - dynamodb:GetItem
-            - dynamodb:PutItem
-          Resource:
-            - arn:aws:dynamodb:${self:provider.region}:*:table/redbird-menu
-        - Effect: Allow
-          Action:
-            - dynamodb:GetItem
-            - dynamodb:PutItem
-            - dynamodb:DeleteItem
           Resource:
             - arn:aws:dynamodb:${self:provider.region}:*:table/square-oauth-state
         - Effect: Allow
@@ -65,11 +74,6 @@ provider:
             - dynamodb:GetItem
           Resource:
             - arn:aws:dynamodb:${self:provider.region}:*:table/phoneNumberClientMap
-        - Effect: Allow
-          Action:
-            - dynamodb:GetItem
-          Resource:
-            - arn:aws:dynamodb:${self:provider.region}:*:table/clientMenu
         - Effect: Allow
           Action:
             - dynamodb:GetItem
@@ -140,6 +144,22 @@ functions:
           method: post
           cors: true
 
+  removeModifierFromCart:
+    handler: cart.removeModifierFromCart
+    events:
+      - http:
+          path: remove-modifier-from-cart
+          method: post
+          cors: true
+
+  logger:
+    handler: logger.logger
+    events:
+      - http:
+          path: logger
+          method: post
+          cors: true
+
   createOrderAndPaymentLink:
     handler: createOrderAndPaymentLink.createOrderAndPaymentLink
     events:
@@ -173,12 +193,21 @@ functions:
           method: get
     timeout: 30
 
+  sendOrderingLink:
+    handler: orderingLink.sendOrderingLink
+    events:
+      - httpApi:
+          path: /send-ordering-link
+          method: post
+    timeout: 30
+
 resources:
   Resources:
+    # Only stage-specific tables are managed by CloudFormation
     YapnAnalyticsTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: yapn-analytics
+        TableName: yapn-analytics-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
           - AttributeName: restaurant_phone
@@ -187,79 +216,26 @@ resources:
           - AttributeName: restaurant_phone
             KeyType: HASH
 
-    RestaurantCatalogTable:
+    ClientMenuTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: restaurant-catalog
+        TableName: clientMenu-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
-          - AttributeName: agent_number
+          - AttributeName: restaurantName
             AttributeType: S
-          - AttributeName: item_name
-            AttributeType: S
-        KeySchema:
-          - AttributeName: agent_number
-            KeyType: HASH      # Partition Key
-          - AttributeName: item_name
-            KeyType: RANGE     # Sort Key
-
-    SquareOAuthStateTable:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: square-oauth-state
-        BillingMode: PAY_PER_REQUEST
-        AttributeDefinitions:
-          - AttributeName: state
+          - AttributeName: locationID
             AttributeType: S
         KeySchema:
-          - AttributeName: state
+          - AttributeName: restaurantName
             KeyType: HASH
-        TimeToLiveSpecification:
-          AttributeName: expires_at
-          Enabled: true
-
-    SquareMerchantsTable:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: square-merchants
-        BillingMode: PAY_PER_REQUEST
-        AttributeDefinitions:
-          - AttributeName: restaurant_id
-            AttributeType: S
-          - AttributeName: merchant_id
-            AttributeType: S
-        KeySchema:
-          - AttributeName: restaurant_id
-            KeyType: HASH      # Partition Key
-        GlobalSecondaryIndexes:
-          - IndexName: MerchantIdIndex
-            KeySchema:
-              - AttributeName: merchant_id
-                KeyType: HASH
-            Projection:
-              ProjectionType: ALL
-
-    # RedbirdMenuTable already exists, commenting out to avoid deployment conflicts
-    # RedbirdMenuTable:
-    #   Type: AWS::DynamoDB::Table
-    #   Properties:
-    #     TableName: redbird-menu
-    #     BillingMode: PAY_PER_REQUEST
-    #     AttributeDefinitions:
-    #       - AttributeName: item_name
-    #         AttributeType: S
-    #       - AttributeName: variation
-    #         AttributeType: S
-    #     KeySchema:
-    #       - AttributeName: item_name
-    #         KeyType: HASH      # Partition Key
-    #       - AttributeName: variation
-    #         KeyType: RANGE     # Sort Key
+          - AttributeName: locationID
+            KeyType: RANGE
 
     SessionCartsTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: session-carts
+        TableName: session-carts-${self:provider.stage}
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
           - AttributeName: call_id
@@ -270,6 +246,18 @@ resources:
         TimeToLiveSpecification:
           AttributeName: ttl
           Enabled: true
+
+    # Shared tables are managed separately and not included in CloudFormation:
+    # - phoneNumberClientMap (shared)
+    # - session-carts (shared)
+    # - clientDatabase (shared)
+    # - square-merchants (shared)
+    # - square-oauth-state (shared)
+    # - clientMenu (created by sync script with stage suffix)
+    # 
+    # Legacy tables removed:
+    # - restaurant-catalog (deleted)
+    # - redbird-menu (deleted)
 
 plugins:
   - serverless-offline

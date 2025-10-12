@@ -6,9 +6,9 @@ AWS.config.update({
 });
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
-const PHONE_NUMBER_CLIENT_MAP_TABLE = 'phoneNumberClientMap';
-const CLIENT_DATABASE_TABLE = 'clientDatabase';
-const CLIENT_MENU_TABLE = 'clientMenu';
+const PHONE_NUMBER_CLIENT_MAP_TABLE = process.env.PHONE_NUMBER_CLIENT_MAP_TABLE || 'phoneNumberClientMap';
+const CLIENT_DATABASE_TABLE = process.env.CLIENT_DATABASE_TABLE || 'clientDatabase';
+const CLIENT_MENU_TABLE = process.env.CLIENT_MENU_TABLE || 'clientMenu';
 
 // Helper function to parse hours string (e.g., "11:00-22:00")
 function parseHours(hoursString) {
@@ -69,46 +69,54 @@ function formatWeeklyHoursForSpeech(restaurantHours) {
 
 // Helper function to calculate store status based on dynamic hours
 function calculateDynamicStoreStatus(restaurantHours) {
-  // Get current time in Eastern Time
-  const now = new Date();
-  const easternTime = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
-  
-  const dayOfWeek = easternTime.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const todayName = dayNames[dayOfWeek];
-  
-  // Get today's hours
-  const todayHours = restaurantHours[todayName];
-  if (!todayHours) {
-    return {
-      status: "store hours not available.",
-      allHours: formatWeeklyHoursForSpeech(restaurantHours)
-    };
-  }
-  
-  // Parse hours
-  const parsedHours = parseHours(todayHours);
-  if (!parsedHours) {
-    return {
-      status: "store hours not available.",
-      allHours: formatWeeklyHoursForSpeech(restaurantHours)
-    };
-  }
-  
-  // Check if currently open
-  const currentTimeInMinutes = easternTime.getHours() * 60 + easternTime.getMinutes();
-  const isOpen = currentTimeInMinutes >= parsedHours.openTime && currentTimeInMinutes < parsedHours.closeTime;
-  
-  const status = isOpen ? 
-    "store is open." : 
-    "store is closed. You cannot order at this time. Please call back when we are open to place an order.";
+  try {
+    // Get current time in Eastern Time
+    const now = new Date();
+    const easternTime = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
     
-  const allHoursFormatted = formatWeeklyHoursForSpeech(restaurantHours);
-  
-  return {
-    status: status,
-    allHours: allHoursFormatted
-  };
+    const dayOfWeek = easternTime.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const todayName = dayNames[dayOfWeek];
+    
+    // Get today's hours
+    const todayHours = restaurantHours?.[todayName];
+    if (!todayHours) {
+      return {
+        status: "store hours not available.",
+        allHours: formatWeeklyHoursForSpeech(restaurantHours || {})
+      };
+    }
+    
+    // Parse hours
+    const parsedHours = parseHours(todayHours);
+    if (!parsedHours) {
+      return {
+        status: "store hours not available.",
+        allHours: formatWeeklyHoursForSpeech(restaurantHours || {})
+      };
+    }
+    
+    // Check if currently open
+    const currentTimeInMinutes = easternTime.getHours() * 60 + easternTime.getMinutes();
+    const isOpen = currentTimeInMinutes >= parsedHours.openTime && currentTimeInMinutes < parsedHours.closeTime;
+    
+    const status = isOpen ? 
+      "store is open." : 
+      "store is closed. You cannot order at this time. Please call back when we are open to place an order.";
+      
+    const allHoursFormatted = formatWeeklyHoursForSpeech(restaurantHours || {});
+    
+    return {
+      status: status,
+      allHours: allHoursFormatted
+    };
+  } catch (error) {
+    console.warn('Error calculating store status:', error.message);
+    return {
+      status: "store status unavailable.",
+      allHours: "hours not available"
+    };
+  }
 }
 
 module.exports.handleInboundCall = async (event) => {
@@ -182,38 +190,65 @@ module.exports.handleInboundCall = async (event) => {
     console.log('Extracted to_number (restaurant):', toNumber);
 
     // Step 1: Get location ID from phone number
-    const locationData = await getLocationFromPhoneNumber(toNumber);
-    console.log(`Found location ID: ${locationData.locationId}`);
+    let locationData;
+    try {
+      locationData = await getLocationFromPhoneNumber(toNumber);
+      console.log(`Found location ID: ${locationData.locationId}`);
+    } catch (error) {
+      console.warn('Location lookup failed:', error.message);
+      locationData = { locationId: '' };
+    }
 
     // Step 2: Get restaurant details from clientDatabase
-    const restaurantData = await getRestaurantDetails(locationData.locationId);
-    console.log(`Found restaurant: ${restaurantData.restaurantName} at ${restaurantData.address}`);
+    let restaurantData;
+    try {
+      restaurantData = await getRestaurantDetails(locationData.locationId);
+      console.log(`Found restaurant: ${restaurantData.restaurantName} at ${restaurantData.address}`);
+    } catch (error) {
+      console.warn('Restaurant details lookup failed:', error.message);
+      restaurantData = { restaurantName: 'Restaurant', address: 'Address not available', hours: {} };
+    }
 
     // Step 3: Calculate dynamic store status using database hours
-    const storeInfo = calculateDynamicStoreStatus(restaurantData.hours);
-    console.log('Store status calculated:', storeInfo.status);
+    let storeInfo;
+    try {
+      storeInfo = calculateDynamicStoreStatus(restaurantData.hours);
+      console.log('Store status calculated:', storeInfo.status);
+    } catch (error) {
+      console.warn('Store status calculation failed:', error.message);
+      storeInfo = { status: 'Store status unavailable', allHours: 'Hours not available' };
+    }
 
     // Step 4: Get location-specific menu items
-    const menuItemNames = await getLocationSpecificMenuItems(restaurantData.restaurantName, locationData.locationId);
+    let menuItemNames = [];
+    try {
+      menuItemNames = await getLocationSpecificMenuItems(restaurantData.restaurantName, locationData.locationId);
+    } catch (error) {
+      console.warn('Menu lookup failed, continuing without menu:', error.message);
+      menuItemNames = [];
+    }
 
     // Return the response with enhanced dynamic variables
     const response = {
       call_inbound: {
         dynamic_variables: {
           caller_number: fromNumber,
-          restaurant_name: restaurantData.restaurantName,
-          restaurant_address: restaurantData.address,
-          menu_item_names: menuItemNames.join(', '),
-          store_status: storeInfo.status,
-          store_hours: storeInfo.allHours
+          restaurant_name: restaurantData?.restaurantName || 'Restaurant',
+          restaurant_address: restaurantData?.address || 'Address not available',
+          location_id: locationData?.locationId || '',
+          transfer_number: restaurantData?.transferNumber || '',
+          greeting_phrase: restaurantData?.greetingPhrase || '',
+          menu_item_names: menuItemNames?.join(', ') || 'Menu not available',
+          store_status: storeInfo?.status || 'Store status unavailable',
+          store_hours: storeInfo?.allHours || 'Hours not available'
         },
         metadata: {
-          request_timestamp: new Date().toISOString(),
-          location_id: locationData.locationId
+          request_timestamp: new Date().toISOString()
         }
       }
     };
 
+    console.log('Final dynamic variables payload:', JSON.stringify(response.call_inbound.dynamic_variables, null, 2));
     console.log('Returning response with menu items:', JSON.stringify(response, null, 2));
 
     return {
@@ -310,7 +345,8 @@ async function getLocationSpecificMenuItems(restaurantName, locationId) {
     const result = await dynamodb.get(params).promise();
     
     if (!result.Item) {
-      throw new Error(`No menu found for ${restaurantName} at location ${locationId}`);
+      console.warn(`No menu found for ${restaurantName} at location ${locationId}`);
+      return [];
     }
     
     console.log(`Found menu with ${result.Item.itemCount || 'unknown'} items`);
@@ -323,7 +359,13 @@ async function getLocationSpecificMenuItems(restaurantName, locationId) {
         // Extract price from itemData
         const price = itemData.price || 0;
         const formattedPrice = (price / 100).toFixed(2); // Convert cents to dollars
-        return `${itemName} $${formattedPrice}`;
+        
+        // Add description if available
+        const description = itemData.description && itemData.description.trim() 
+          ? ` - ${itemData.description}` 
+          : '';
+        
+        return `${itemName} $${formattedPrice}${description}`;
       })
       .sort();
     

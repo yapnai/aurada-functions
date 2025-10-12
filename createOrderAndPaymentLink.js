@@ -67,8 +67,38 @@ function getSquareClient(environment = 'production') {
   return squareClientCache[environment];
 }
 
-const REDBIRD_MENU_TABLE = 'redbird-menu';
-const SESSION_CARTS_TABLE = 'session-carts';
+// Function to get restaurant's Square OAuth credentials from square-merchants table
+async function getRestaurantSquareCredentials(restaurantName) {
+  const params = {
+    TableName: MERCHANTS_TABLE,
+    Key: { PK: restaurantName }
+  };
+  
+  try {
+    console.log(`Getting Square credentials for restaurant: ${restaurantName}`);
+    const result = await dynamodb.get(params).promise();
+    
+    if (!result.Item) {
+      throw new Error(`Restaurant "${restaurantName}" not found in square-merchants table. They need to authorize first.`);
+    }
+    
+    console.log(`✅ Found OAuth credentials for: ${result.Item.business_name}`);
+    return {
+      access_token: result.Item.access_token,
+      locations: result.Item.locations,
+      merchant_id: result.Item.merchant_id,
+      business_name: result.Item.business_name
+    };
+  } catch (error) {
+    console.error('Error getting restaurant Square credentials:', error);
+    throw error;
+  }
+}
+
+const SESSION_CARTS_TABLE = process.env.SESSION_CARTS_TABLE || 'session-carts';
+const PHONE_NUMBER_CLIENT_MAP_TABLE = process.env.PHONE_NUMBER_CLIENT_MAP_TABLE || 'phoneNumberClientMap';
+const CLIENT_DATABASE_TABLE = process.env.CLIENT_DATABASE_TABLE || 'clientDatabase';
+const MERCHANTS_TABLE = process.env.MERCHANTS_TABLE || 'square-merchants';
 
 // Simple UUID alternative using timestamp and random number
 function generateIdempotencyKey() {
@@ -78,6 +108,72 @@ function generateIdempotencyKey() {
 // Session cart helper functions
 function extractCallId(body) {
   return body.call?.call_id;
+}
+
+function extractPhoneNumber(body) {
+  // Extract the restaurant phone number (the number customer called)
+  // For phone calls: use to_number
+  // For web calls: fallback to default restaurant number for testing
+  return body.call?.to_number || '+17037057917';
+}
+
+async function getLocationFromPhoneNumber(phoneNumber) {
+  if (!phoneNumber) {
+    throw new Error('Phone number is required for location lookup');
+  }
+
+  const params = {
+    TableName: PHONE_NUMBER_CLIENT_MAP_TABLE,
+    Key: { phoneNumber: phoneNumber }
+  };
+
+  try {
+    console.log(`Looking up location for phone number: ${phoneNumber}`);
+    const result = await dynamodb.get(params).promise();
+    
+    if (!result.Item) {
+      throw new Error(`No location found for phone number: ${phoneNumber}`);
+    }
+
+    console.log(`Found location: ${result.Item.restaurantName} - ${result.Item.locationId}`);
+    return {
+      locationId: result.Item.locationId,
+      restaurantName: result.Item.restaurantName
+    };
+  } catch (error) {
+    console.error('Error looking up location:', error);
+    throw error;
+  }
+}
+
+async function getRestaurantDetails(locationId) {
+  if (!locationId) {
+    throw new Error('Location ID is required for restaurant lookup');
+  }
+
+  const params = {
+    TableName: CLIENT_DATABASE_TABLE,
+    Key: { locationId: locationId }
+  };
+
+  try {
+    console.log(`Getting restaurant details for location: ${locationId}`);
+    const result = await dynamodb.get(params).promise();
+    
+    if (!result.Item) {
+      throw new Error(`No restaurant found for location ID: ${locationId}`);
+    }
+
+    console.log(`Found restaurant: ${result.Item.restaurantName} at ${result.Item.address}`);
+    return {
+      restaurantName: result.Item.restaurantName,
+      address: result.Item.address,
+      locationId: result.Item.locationId
+    };
+  } catch (error) {
+    console.error('Error getting restaurant details:', error);
+    throw error;
+  }
 }
 
 async function getSessionCart(callId) {
@@ -162,14 +258,32 @@ module.exports.createOrderAndPaymentLink = async (event) => {
 
     // Extract customer info and other data from request  
     const phone = requestBody.args?.phone || requestBody.phone;
+    const customerName = requestBody.customerName;
+    const phoneNumber = extractPhoneNumber(requestBody);
+    
+    // Get location ID from phone number mapping
+    let locationId = requestBody.args?.locationId || requestBody.locationId;
+    if (!locationId) {
+      try {
+        const locationData = await getLocationFromPhoneNumber(phoneNumber);
+        locationId = locationData.locationId;
+        console.log(`✅ Resolved location ID from phone ${phoneNumber}: ${locationId}`);
+      } catch (error) {
+        console.error(`❌ Failed to resolve location from phone ${phoneNumber}:`, error.message);
+        // Fallback to secrets if lookup fails
+        locationId = null;
+      }
+    }
     
     cartData = {
       updatedCart: sessionCart,
       cartSummary: cartSummary,
       customerInfo: requestBody.args?.customerInfo || requestBody.customerInfo || (phone ? { phone: phone } : null),
-      locationId: requestBody.args?.locationId || requestBody.locationId,
+      customerName: customerName,
+      locationId: locationId,
       checkoutOptions: requestBody.args?.checkoutOptions || requestBody.checkoutOptions,
-      description: requestBody.args?.description || requestBody.description
+      description: requestBody.args?.description || requestBody.description,
+      phoneNumber: phoneNumber  // Add phone number for restaurant lookup
     };
 
     console.log('Payment link request with session cart:', {
@@ -182,16 +296,47 @@ module.exports.createOrderAndPaymentLink = async (event) => {
     // Step 1: Convert cart data to Square format (no validation needed)
     const orderResult = convertCartToSquareOrder(cartData.updatedCart, cartData.cartSummary);
     
-    // Step 2: Create Square payment link with processed order
-    const paymentLinkResult = await createSquarePaymentLink({
-      squareClient: squareClient,
-      locationId: cartData.locationId || squareCredentialsCache[environment].SQUARE_LOCATION_ID,
-      lineItems: orderResult.squareLineItems,
-      customerInfo: cartData.customerInfo,
-      orderSummary: orderResult.orderSummary,
-      checkoutOptions: cartData.checkoutOptions,
-      description: cartData.description
-    });
+    // Step 2: Create payment link (environment-specific)
+    let paymentLinkResult;
+    if (environment === 'sandbox') {
+      console.log('🧪 Sandbox mode: Creating mock payment link');
+      paymentLinkResult = await createMockPaymentLink({
+        locationId: cartData.locationId || squareCredentialsCache[environment].SQUARE_LOCATION_ID,
+        orderSummary: orderResult.orderSummary,
+        description: cartData.description,
+        customerName: cartData.customerName
+      });
+    } else {
+      console.log('🏭 Production mode: Creating real Square payment link');
+      
+      // Get restaurant info from phone number mapping
+      const locationData = await getLocationFromPhoneNumber(phoneNumber);
+      const restaurantName = locationData.restaurantName; // "The Red Bird Hot Chicken & Fries"
+      const restaurantLocationId = locationData.locationId; // "L1RNWD28M2J3M"
+      
+      console.log(`✅ Restaurant: ${restaurantName}, Location: ${restaurantLocationId}`);
+      
+      // Get restaurant's OAuth credentials
+      const restaurantCredentials = await getRestaurantSquareCredentials(restaurantName);
+      
+      // Create Square client with restaurant's OAuth token
+      const restaurantSquareClient = new SquareClient({
+        token: restaurantCredentials.access_token,
+        environment: SquareEnvironment.Production
+      });
+      
+      console.log(`✅ Using restaurant OAuth credentials for: ${restaurantCredentials.business_name}`);
+      
+      paymentLinkResult = await createSquarePaymentLink({
+        squareClient: restaurantSquareClient,
+        locationId: cartData.locationId || restaurantLocationId,
+        lineItems: orderResult.squareLineItems,
+        customerInfo: cartData.customerInfo,
+        orderSummary: orderResult.orderSummary,
+        checkoutOptions: cartData.checkoutOptions,
+        description: cartData.description
+      });
+    }
 
     // Step 3: Send SMS with payment link if customer phone is provided
     let smsResult = null;
@@ -200,7 +345,8 @@ module.exports.createOrderAndPaymentLink = async (event) => {
         smsResult = await sendPaymentLinkSMS(
           cartData.customerInfo.phone,
           paymentLinkResult.paymentLink.url,
-          orderResult.orderSummary
+          orderResult.orderSummary,
+          cartData.phoneNumber  // Pass restaurant phone number for lookup
         );
         console.log('✅ SMS sent successfully with payment link');
       } catch (smsError) {
@@ -247,20 +393,27 @@ function convertCartToSquareOrder(cartItems, cartSummary) {
   
   // Build Square-ready line items from DynamoDB cart data
   const squareLineItems = cartItems.map(item => {
-    // Validate required price_money property
-    if (!item.price_money || !item.price_money.amount) {
-      console.error('Cart item missing price_money:', JSON.stringify(item, null, 2));
+    // Use cart's native price and currency fields
+    if (!item.price || !item.currency) {
+      console.error('Cart item missing price information:', JSON.stringify(item, null, 2));
       throw new Error(`Cart item "${item.item_name}" is missing price information. Please refresh cart.`);
     }
+    
+    // Calculate total item price including modifiers
+    // item.price is in cents, modifier.price is in dollars (needs conversion)
+    const modifierPriceInCents = (item.modifiers || [])
+      .reduce((sum, mod) => sum + Math.round((mod.price || 0) * 100), 0);
+    
+    const totalPriceInCents = item.price + modifierPriceInCents;
     
     return {
       name: `${item.item_name} - Regular`,  // Hard-code "Regular" since cart no longer includes variation
       quantity: item.quantity.toString(),
       variationName: "Regular",  // Hard-code "Regular" 
-      catalogObjectId: item.square_variation_id,
+      catalogObjectId: item.variation_id, // Use variation_id from cart
       basePriceMoney: {
-        amount: BigInt(parseInt(item.price_money.amount)), // Already in cents from DynamoDB
-        currency: item.price_money.currency || 'USD'
+        amount: BigInt(totalPriceInCents), // Total price including modifiers in cents
+        currency: item.currency
       },
       ...(item.specialInstructions && { note: item.specialInstructions })
     };
@@ -290,6 +443,34 @@ async function processOrderWithMenu(items) {
   throw new Error('This function is deprecated. Use cart functions for validation.');
 }
 
+// Helper function to create mock payment link for sandbox testing
+async function createMockPaymentLink({ locationId, orderSummary, description, customerName }) {
+  console.log('Creating mock payment link for sandbox testing...');
+  
+  const timestamp = Date.now();
+  const orderId = `MOCK_ORDER_${timestamp}`;
+  const paymentLinkId = `mock_payment_link_${timestamp}`;
+  
+  // Generate realistic-looking mock URLs
+  const mockUrl = `https://yapn.ai`;  // Short URL
+  const mockLongUrl = `https://www.yapn.ai/order/${orderId}?ref=voice_ai`; // Long URL
+  
+  console.log(`✅ Mock payment link created: ${mockUrl}`);
+  
+  // Return same structure as real Square API response
+  return {
+    paymentLink: {
+      id: paymentLinkId,
+      version: 1,
+      orderId: orderId,
+      url: mockUrl,
+      longUrl: mockLongUrl,
+      createdAt: new Date().toISOString()
+    },
+    relatedResources: null
+  };
+}
+
 // Helper function to create Square payment link
 async function createSquarePaymentLink({ squareClient, locationId, lineItems, customerInfo, orderSummary, checkoutOptions, description }) {
   console.log('Creating Square payment link...');
@@ -302,7 +483,7 @@ async function createSquarePaymentLink({ squareClient, locationId, lineItems, cu
       lineItems: lineItems,
       referenceId: `ORDER-${Date.now()}`,
       source: {
-        name: 'Red Bird Chicken Voice AI'
+        name: `Order for ${cartData.customerName} by yapn Voice AI`
       }
     }
   };
@@ -386,9 +567,25 @@ function createErrorResponse(statusCode, message, additionalData = {}) {
 }
 
 // Function to send payment link via SMS using TextBelt
-async function sendPaymentLinkSMS(phoneNumber, paymentLinkUrl, orderSummary) {
+async function sendPaymentLinkSMS(phoneNumber, paymentLinkUrl, orderSummary, restaurantPhoneNumber) {
   return new Promise(async (resolve, reject) => {
     try {
+      // Get restaurant details for dynamic SMS
+      let restaurantName = 'Restaurant';
+      let address = 'Restaurant location';
+      
+      try {
+        const locationData = await getLocationFromPhoneNumber(restaurantPhoneNumber);
+        const restaurantDetails = await getRestaurantDetails(locationData.locationId);
+        restaurantName = restaurantDetails.restaurantName;
+        address = restaurantDetails.address;
+        console.log(`Using dynamic restaurant data: ${restaurantName} at ${address}`);
+      } catch (lookupError) {
+        console.error('Failed to get restaurant details, using generic message:', lookupError.message);
+        restaurantName = null;
+        address = null;
+      }
+
       // Get TextBelt API key from Secrets Manager
       const textbeltResult = await secretsManager.getSecretValue({ SecretId: 'textbelt-api-key' }).promise();
       const textbeltApiKey = textbeltResult.SecretString;
@@ -411,15 +608,17 @@ async function sendPaymentLinkSMS(phoneNumber, paymentLinkUrl, orderSummary) {
         itemList = `Your order: ${itemList}. `;
       }
 
-      // Format the SMS message with payment link (Square calculates final total)
-      const message = `🐔 Red Bird Chicken Order Ready! ${itemList}Subtotal: $${subtotal} (+ tax). Complete your payment here: ${paymentLinkUrl}. Pick up at: 282 Cedar Ln SE, Vienna, VA 22180. `;
+      // Format the SMS message with dynamic restaurant data (graceful fallback for missing data)
+      const restaurantPart = restaurantName ? `from ${restaurantName} ` : '';
+      const addressPart = address ? `Pick up at: ${address}.` : '';
+      const message = `Your order ${restaurantPart}is almost ready! \n${itemList}Subtotal: $${subtotal} (+ tax). \nComplete your payment here: ${paymentLinkUrl}. \n${addressPart}`;
 
       // Prepare form data for TextBelt
       const formData = new URLSearchParams();
       formData.append('phone', phoneNumber);
       formData.append('message', message);
       formData.append('key', textbeltApiKey);
-      formData.append('sender', 'Red Bird Chicken');
+      formData.append('sender', restaurantName || 'Restaurant');
 
       const postData = formData.toString();
 

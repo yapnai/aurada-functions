@@ -93,7 +93,7 @@ async function updateMerchantTokens(restaurantId, newTokenData) {
   const updateParams = {
     TableName: MERCHANTS_TABLE,
     Key: {
-      restaurant_id: restaurantId
+      PK: restaurantId
     },
     UpdateExpression: 'SET access_token = :access_token, refresh_token = :refresh_token, expires_at = :expires_at, updated_at = :updated_at',
     ExpressionAttributeValues: {
@@ -123,7 +123,7 @@ async function refreshSquareTokens(restaurantId = 'redbird-prod') {
     const params = {
       TableName: MERCHANTS_TABLE,
       Key: {
-        restaurant_id: restaurantId
+        PK: restaurantId
       }
     };
     

@@ -72,6 +72,8 @@ module.exports.authorize = async (event) => {
     // Essential scopes for menu management and payments
     const scopes = [
       'MERCHANT_PROFILE_READ',         // Basic business info
+      'ORDERS_READ',                   // Read order data
+      'ORDERS_WRITE',                  // Create orders and payment links
       'PAYMENTS_WRITE',                // Create payment links
       'ITEMS_READ',                    // Get catalog/menu items
       'ITEMS_WRITE',                   // Update menu items (optional)

@@ -69,7 +69,7 @@ module.exports.callback = async (event) => {
     console.log('Extracted query parameters:', queryParams);
     
     const authorizationCode = queryParams.code;
-    const state = queryParams.state;
+    let state = queryParams.state;
     const error = queryParams.error;
     
     // Handle authorization errors (user denied, etc.)
@@ -80,20 +80,38 @@ module.exports.callback = async (event) => {
     }
     
     // Validate required parameters
-    if (!authorizationCode || !state) {
-      console.error('Missing required parameters:', { code: !!authorizationCode, state: !!state });
+    if (!authorizationCode) {
+      console.error('Missing authorization code');
       console.error('Raw event queryStringParameters:', event.queryStringParameters);
       console.error('Raw event rawQueryString:', event.rawQueryString);
       return createErrorPageResponse('Invalid Request', 
-        'Missing required authorization parameters from Square.');
+        'Missing authorization code from Square.');
     }
     
-    // Validate state parameter (CSRF protection)
-    const stateData = await validateAndGetState(state);
-    if (!stateData) {
-      console.error('Invalid or expired state parameter:', state);
-      return createErrorPageResponse('Invalid Request', 
-        'The authorization request has expired or is invalid. Please try again.');
+    // Validate state parameter (CSRF protection) - with fallback for Square's mobile OAuth issues
+    let stateData = null;
+    
+    if (state) {
+      // Preferred: Use the state parameter if provided (desktop flow)
+      console.log('State parameter provided:', state);
+      stateData = await validateAndGetState(state);
+      if (!stateData) {
+        console.error('Invalid or expired state parameter:', state);
+        return createErrorPageResponse('Invalid Request', 
+          'The authorization request has expired or is invalid. Please try again.');
+      }
+    } else {
+      // Fallback: Square mobile doesn't return state parameter consistently
+      console.log('No state parameter from Square - using fallback method (likely mobile OAuth)');
+      stateData = await findMostRecentValidState();
+      if (!stateData) {
+        console.error('No valid pending authorization found');
+        return createErrorPageResponse('Invalid Request', 
+          'No pending authorization found. Please restart the authorization process.');
+      }
+      console.log('Found pending authorization for restaurant:', stateData.restaurant_id);
+      // Set state for any cleanup or logging that might need it
+      state = stateData.state;
     }
     
     console.log('Valid state found for restaurant:', stateData.restaurant_id);
@@ -118,8 +136,8 @@ module.exports.callback = async (event) => {
     // Store merchant data, tokens, and locations
     await storeMerchantData(stateData.restaurant_id, tokenData, merchantInfo, locationData);
     
-    // Clean up state data
-    await cleanupState(state);
+    // Note: Not cleaning up state data for now to support mobile OAuth fallback
+    // TODO: Add cleanup job later to remove old OAuth states
     
     console.log('Successfully authorized restaurant:', stateData.restaurant_id);
     console.log('Merchant name:', merchantInfo.businessName);
@@ -162,6 +180,41 @@ async function validateAndGetState(state) {
     
   } catch (error) {
     console.error('Error validating state:', error);
+    return null;
+  }
+}
+
+// Helper function to find the most recent valid OAuth state when Square doesn't return state parameter
+async function findMostRecentValidState() {
+  const params = {
+    TableName: OAUTH_STATE_TABLE
+  };
+  
+  try {
+    const result = await dynamodb.scan(params).promise();
+    
+    if (!result.Items || result.Items.length === 0) {
+      return null;
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    
+    // Filter to only non-expired states and sort by creation time (most recent first)
+    const validStates = result.Items
+      .filter(item => item.expires_at > now)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    
+    if (validStates.length === 0) {
+      return null;
+    }
+    
+    // Return the most recent valid state
+    console.log(`Found ${validStates.length} valid pending state(s), using most recent`);
+    console.log('Selected state for restaurant:', validStates[0].restaurant_id);
+    return validStates[0];
+    
+  } catch (error) {
+    console.error('Error finding valid OAuth state:', error);
     return null;
   }
 }
@@ -358,7 +411,7 @@ async function storeMerchantData(restaurantId, tokenData, merchantInfo, location
   const params = {
     TableName: MERCHANTS_TABLE,
     Item: {
-      restaurant_id: restaurantId,
+      PK: restaurantId,
       merchant_id: tokenData.merchant_id,
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,

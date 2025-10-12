@@ -6,18 +6,99 @@ AWS.config.update({
 });
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
-const SESSION_CARTS_TABLE = 'session-carts';
-const PHONE_NUMBER_CLIENT_MAP_TABLE = 'phoneNumberClientMap';
-const CLIENT_MENU_TABLE = 'clientMenu';
+const SESSION_CARTS_TABLE = process.env.SESSION_CARTS_TABLE || 'session-carts';
+const PHONE_NUMBER_CLIENT_MAP_TABLE = process.env.PHONE_NUMBER_CLIENT_MAP_TABLE || 'phoneNumberClientMap';
+const CLIENT_MENU_TABLE = process.env.CLIENT_MENU_TABLE || 'clientMenu';
 
 // Session cart helper functions
 function extractCallId(body) {
   return body.call?.call_id;
 }
 
+// Helper function to find and apply spice level modifiers
+function findSpiceLevelModifier(menuItem, spiceLevel, isFirstItem, is2PcItem) {
+  if (!spiceLevel || !menuItem.modifiers) {
+    return null;
+  }
+
+  let targetCategory = null;
+
+  if (is2PcItem) {
+    // For 2PC items, look for first/second sandwich mod categories
+    const categoryName = isFirstItem 
+      ? "Choose Your First Sandwich Mods" 
+      : "Choose Your Second Sandwich Mods";
+    
+    targetCategory = menuItem.modifiers.find(cat => cat.category === categoryName);
+  } else {
+    // For single items, look for categories containing "Spice Level"
+    targetCategory = menuItem.modifiers.find(cat => 
+      cat.category.toLowerCase().includes('spice level')
+    );
+  }
+
+  if (!targetCategory || !targetCategory.options) {
+    console.log(`No appropriate spice category found for ${isFirstItem ? 'first' : 'second'} item`);
+    return null;
+  }
+
+  // Find the spice level option in the category
+  const spiceOption = targetCategory.options.find(option => 
+    option.name.trim().toLowerCase() === spiceLevel.toLowerCase()
+  );
+
+  if (!spiceOption) {
+    console.log(`Spice level "${spiceLevel}" not found in category "${targetCategory.category}"`);
+    return null;
+  }
+
+  return {
+    category: targetCategory.category,
+    optionId: spiceOption.id,
+    optionName: spiceOption.name,
+    price: spiceOption.price / 100, // Convert cents to dollars
+    currency: spiceOption.currency
+  };
+}
+
+// Helper function to find modifier in specific category
+function findModifierInCategory(menuItem, modifierName, targetCategoryName) {
+  if (!modifierName || !menuItem.modifiers) {
+    return null;
+  }
+
+  // Find the target category
+  const targetCategory = menuItem.modifiers.find(cat => cat.category === targetCategoryName);
+  
+  if (!targetCategory || !targetCategory.options) {
+    console.log(`Category "${targetCategoryName}" not found or has no options`);
+    return null;
+  }
+
+  // Find the modifier option in the category
+  const modifierOption = targetCategory.options.find(option => 
+    option.name.trim() === modifierName.trim()
+  );
+
+  if (!modifierOption) {
+    console.log(`Modifier "${modifierName}" not found in category "${targetCategoryName}"`);
+    return null;
+  }
+
+  return {
+    category: targetCategory.category,
+    optionId: modifierOption.id,
+    optionName: modifierOption.name,
+    price: modifierOption.price / 100, // Convert cents to dollars
+    currency: modifierOption.currency
+  };
+}
+
 function extractPhoneNumber(body) {
   // Extract the restaurant phone number (the number customer called)
-  return body.call?.to_number;
+  // For phone calls: use to_number
+  // For web calls: fallback to default restaurant number for testing
+  return body.call?.to_number || '+17039120079';
 }
 
 async function getLocationFromPhoneNumber(phoneNumber) {
@@ -203,10 +284,14 @@ function createSpeechFriendlySummary(sessionCart, subtotal) {
   const speechItems = sessionCart.map(item => {
     let itemName = item.item_name || item.name || 'Unknown Item';
     
+    // For SODA items, use the actual drink name from specialInstructions
+    if (itemName.toUpperCase() === 'SODA' && item.specialInstructions) {
+      itemName = item.specialInstructions;
+    }
+    
     // Apply speech transformations
     itemName = itemName.replace(/(\d+)pc\b/g, '$1 piece'); // 2pc -> 2 piece
-    itemName = itemName.replace(/\bw\//g, 'with'); // w/ -> with
-    itemName = itemName.replace(/FCK YOU CRA/g, 'F You Cray'); // FCK YOU CRA -> F You Cray
+    itemName = itemName.replace(/FCK YOU CRA/g, 'F.C.K.'); // FCK YOU CRA -> F You Cray
     
     const quantity = item.quantity || 1;
     
@@ -225,7 +310,7 @@ function createSpeechFriendlySummary(sessionCart, subtotal) {
 
 // Add item to cart
 module.exports.addToCart = async (event) => {
-  console.log('Adding item to cart...');
+  console.log('[addToCart] Starting function...');
   
   try {
     // Parse the request body
@@ -252,12 +337,16 @@ module.exports.addToCart = async (event) => {
     const itemName = body.args?.itemName;
     const quantity = body.args?.quantity || 1;
     const specialInstructions = body.args?.specialInstructions || '';
+    const firstItemSpiceLevel = body.args?.firstItemSpiceLevel;
+    const secondItemSpiceLevel = body.args?.secondItemSpiceLevel;
 
-    console.log(`Adding to cart for call ${callId}:`, { 
+    console.log(`[addToCart] Call ID: ${callId}, Args:`, { 
       phoneNumber, 
       itemName, 
       quantity, 
-      specialInstructions 
+      specialInstructions,
+      firstItemSpiceLevel,
+      secondItemSpiceLevel
     });
 
     // Validate inputs
@@ -285,46 +374,113 @@ module.exports.addToCart = async (event) => {
       return createErrorResponse(404, `Menu lookup failed: ${error.message}`);
     }
 
-    // Step 3: Find item in location menu
-    const menuItem = findMenuItemInLocationMenu(itemName, locationMenu);
+    // Step 3: Find item in location menu (direct access by item name)
+    const menuItem = locationMenu[itemName];
     if (!menuItem) {
-      return createErrorResponse(404, `Item "${itemName}" not found in ${locationData.restaurantName} ${locationData.locationId} menu`);
+      const availableItems = Object.keys(locationMenu).filter(key => 
+        !['restaurantName', 'locationID'].includes(key)
+      );
+      return createErrorResponse(404, 
+        `Item "${itemName}" not found in ${locationData.restaurantName} ${locationData.locationId} menu`, 
+        { availableItems }
+      );
     }
 
     // Get existing session cart
     const sessionCart = await getSessionCart(callId);
 
-    // Create cart item with full DynamoDB data
+    // Determine if this is a 2PC item
+    const is2PcItem = itemName.includes("(2pc)");
+
+    // Create cart item using new menu structure
     const cartItem = {
-      // Keep original DynamoDB fields for Square compatibility
-      item_name: menuItem.item_name,
-      price_money: menuItem.price_money,
-      square_item_id: menuItem.square_item_id,
-      square_variation_id: menuItem.square_variation_id,
-      description: menuItem.description,
-      category_id: menuItem.category_id,
+      // Square-required fields
+      variation_id: menuItem.variation_id,
+      item_name: itemName,
       
-      // Add cart-specific fields
+      // Menu data
+      price: menuItem.price,
+      currency: menuItem.currency,
+      description: menuItem.description || '',
+      
+      // Square payment processor expects this format
+      price_money: {
+        amount: menuItem.price,
+        currency: menuItem.currency
+      },
+      
+      // Cart-specific fields
       quantity: quantity,
       specialInstructions: specialInstructions,
-      unitPrice: parseInt(menuItem.price_money.amount) / 100,
-      lineTotal: (parseInt(menuItem.price_money.amount) / 100) * quantity,
+      unitPrice: menuItem.price / 100, // Convert cents to dollars
+      lineTotal: (menuItem.price / 100) * quantity,
+      modifiers: [], // Initialize empty modifiers array
       
       // For backward compatibility
-      itemId: menuItem.square_variation_id,
-      name: menuItem.item_name
+      itemId: menuItem.variation_id,
+      name: itemName
     };
 
-    // Check if item already exists in cart (same item + instructions)
-    const existingIndex = sessionCart.findIndex(item => 
-      item.itemId === cartItem.itemId && 
-      item.specialInstructions === cartItem.specialInstructions
-    );
+    // Auto-apply spice level modifiers
+    let totalModifierPrice = 0;
+
+    // Apply first item spice level
+    if (firstItemSpiceLevel) {
+      const firstSpiceModifier = findSpiceLevelModifier(menuItem, firstItemSpiceLevel, true, is2PcItem);
+      if (firstSpiceModifier) {
+        cartItem.modifiers.push(firstSpiceModifier);
+        totalModifierPrice += firstSpiceModifier.price;
+        console.log(`Applied first item spice level: ${firstSpiceModifier.optionName}`);
+      } else {
+        console.warn(`Could not apply first item spice level: ${firstItemSpiceLevel}`);
+      }
+    }
+
+    // Apply second item spice level (only for 2PC items)
+    if (secondItemSpiceLevel) {
+      if (is2PcItem) {
+        const secondSpiceModifier = findSpiceLevelModifier(menuItem, secondItemSpiceLevel, false, is2PcItem);
+        if (secondSpiceModifier) {
+          cartItem.modifiers.push(secondSpiceModifier);
+          totalModifierPrice += secondSpiceModifier.price;
+          console.log(`Applied second item spice level: ${secondSpiceModifier.optionName}`);
+        } else {
+          console.warn(`Could not apply second item spice level: ${secondItemSpiceLevel}`);
+        }
+      } else {
+        console.warn(`Second item spice level ignored for non-2PC item: ${itemName}`);
+      }
+    }
+
+    // Recalculate line total including modifier prices
+    cartItem.lineTotal = (cartItem.unitPrice + totalModifierPrice) * quantity;
+
+    // Check if item already exists in cart (same item + instructions + modifiers)
+    const existingIndex = sessionCart.findIndex(item => {
+      if (item.itemId !== cartItem.itemId || item.specialInstructions !== cartItem.specialInstructions) {
+        return false;
+      }
+      
+      // Compare modifiers (same modifiers = same item configuration)
+      if (item.modifiers?.length !== cartItem.modifiers?.length) {
+        return false;
+      }
+      
+      // Check if all modifiers match
+      const itemModifierIds = (item.modifiers || []).map(mod => mod.optionId).sort();
+      const cartModifierIds = (cartItem.modifiers || []).map(mod => mod.optionId).sort();
+      
+      return JSON.stringify(itemModifierIds) === JSON.stringify(cartModifierIds);
+    });
 
     if (existingIndex >= 0) {
       // Update existing item
       sessionCart[existingIndex].quantity += quantity;
-      sessionCart[existingIndex].lineTotal = sessionCart[existingIndex].unitPrice * sessionCart[existingIndex].quantity;
+      
+      // Recalculate line total including modifiers
+      const existingModifierTotal = (sessionCart[existingIndex].modifiers || [])
+        .reduce((sum, mod) => sum + (mod.price || 0), 0);
+      sessionCart[existingIndex].lineTotal = (sessionCart[existingIndex].unitPrice + existingModifierTotal) * sessionCart[existingIndex].quantity;
     } else {
       // Add new item
       sessionCart.push(cartItem);
@@ -336,7 +492,7 @@ module.exports.addToCart = async (event) => {
     console.log('Item added successfully to session cart');
 
     return createSuccessResponse({
-      message: `Added ${quantity} ${menuItem.item_name} to cart for ${locationData.restaurantName} ${locationData.locationId}`
+      message: `Added ${quantity} ${itemName} to cart for ${locationData.restaurantName} ${locationData.locationId}`
     });
 
   } catch (error) {
@@ -347,7 +503,7 @@ module.exports.addToCart = async (event) => {
 
 // Remove item from cart
 module.exports.removeFromCart = async (event) => {
-  console.log('Removing item from cart...');
+  console.log('[removeFromCart] Starting function...');
   
   try {
     // Parse the request body
@@ -367,7 +523,7 @@ module.exports.removeFromCart = async (event) => {
     const itemName = body.args?.itemName;
     const quantityToRemove = body.args?.quantityToRemove;
 
-    console.log(`Removing from cart for call ${callId}:`, { itemName, quantityToRemove });
+    console.log(`[removeFromCart] Call ID: ${callId}, Args:`, { itemName, quantityToRemove });
 
     // Validate inputs
     if (!itemName) {
@@ -421,7 +577,7 @@ module.exports.removeFromCart = async (event) => {
 
 // Get cart summary with totals
 module.exports.getCartSummary = async (event) => {
-  console.log('Getting cart summary...');
+  console.log('[getCartSummary] Starting function...');
   
   try {
     // Parse the request body
@@ -438,7 +594,7 @@ module.exports.getCartSummary = async (event) => {
       return createErrorResponse(400, 'Missing call ID in request');
     }
 
-    console.log(`Getting cart summary for call: ${callId}`);
+    console.log(`[getCartSummary] Call ID: ${callId}, Args: (no additional args)`);
 
     // Get session cart
     const sessionCart = await getSessionCart(callId);
@@ -470,7 +626,7 @@ module.exports.getCartSummary = async (event) => {
 
 // Generate upsell suggestions based on current cart
 module.exports.upsell = async (event) => {
-  console.log('Generating upsell suggestions...');
+  console.log('[upsell] Starting function...');
   
   try {
     // Parse the request body
@@ -487,7 +643,7 @@ module.exports.upsell = async (event) => {
       return createErrorResponse(400, 'Missing call ID in request');
     }
 
-    console.log(`Generating upsells for call: ${callId}`);
+    console.log(`[upsell] Call ID: ${callId}, Args: (no additional args)`);
 
     // Get session cart
     const sessionCart = await getSessionCart(callId);
@@ -551,7 +707,7 @@ module.exports.upsell = async (event) => {
 
 // Add modifier to cart
 module.exports.addModifierToCart = async (event) => {
-  console.log('Adding modifier to cart...');
+  console.log('[addModifierToCart] Starting function...');
   
   try {
     // Parse the request body
@@ -576,12 +732,14 @@ module.exports.addModifierToCart = async (event) => {
 
     // Extract modifier data from args
     const itemName = body.args?.itemName;
-    const modification = body.args?.modification;
+    const firstSandwichMods = body.args?.firstSandwichMods || [];
+    const secondSandwichMods = body.args?.secondSandwichMods || [];
 
-    console.log(`Adding modifier for call ${callId}:`, { 
+    console.log(`[addModifierToCart] Call ID: ${callId}, Args:`, { 
       phoneNumber, 
       itemName, 
-      modification
+      firstSandwichMods,
+      secondSandwichMods
     });
 
     // Validate inputs
@@ -589,8 +747,8 @@ module.exports.addModifierToCart = async (event) => {
       return createErrorResponse(400, 'Missing required field: itemName');
     }
 
-    if (!modification) {
-      return createErrorResponse(400, 'Missing required field: modification');
+    if (firstSandwichMods.length === 0 && secondSandwichMods.length === 0) {
+      return createErrorResponse(400, 'At least one modifier array (firstSandwichMods or secondSandwichMods) must contain modifiers');
     }
 
     // Step 1: Get location from phone number
@@ -609,72 +767,85 @@ module.exports.addModifierToCart = async (event) => {
       return createErrorResponse(404, `Menu lookup failed: ${error.message}`);
     }
 
-    // Step 3: Find item in location menu
-    const menuItem = findMenuItemInLocationMenu(itemName, locationMenu);
+    // Step 3: Find item in location menu (direct access by item name)
+    const menuItem = locationMenu[itemName];
     if (!menuItem) {
-      return createErrorResponse(404, `Item "${itemName}" not found in ${locationData.restaurantName} menu`);
+      const availableItems = Object.keys(locationMenu).filter(key => 
+        !['restaurantName', 'locationID'].includes(key)
+      );
+      return createErrorResponse(404, 
+        `Item "${itemName}" not found in ${locationData.restaurantName} menu`, 
+        { availableItems }
+      );
     }
 
-    // Step 4: Get raw menu item data for modifier access
-    const metadataFields = ['restaurantName', 'locationID', 'locationName', 'lastUpdated', 'itemCount'];
-    let rawMenuItemData = null;
-    
-    for (const [menuItemName, menuItemData] of Object.entries(locationMenu)) {
-      if (metadataFields.includes(menuItemName)) continue;
-      
-      if (menuItemName.toLowerCase().trim() === itemName.toLowerCase().trim()) {
-        rawMenuItemData = menuItemData;
+    // Step 4: Determine item type and find modifiers
+    const is2PcItem = itemName.includes("(2pc)");
+    const modifiersToApply = [];
+    const failedModifiers = [];
+
+    // Apply first sandwich modifiers
+    if (firstSandwichMods.length > 0) {
+      for (const firstMod of firstSandwichMods) {
+        let firstModifierDetails = null;
+        
+        if (is2PcItem) {
+          // For 2PC items, look in "Choose Your First Sandwich Mods"
+          firstModifierDetails = findModifierInCategory(menuItem, firstMod, "Choose Your First Sandwich Mods");
+        } else {
+          // For single items, search through all categories (existing behavior for single items)
+          for (const modifierCategory of menuItem.modifiers || []) {
+            if (!modifierCategory.options) continue;
+            
+            const option = modifierCategory.options.find(opt => opt.name.trim() === firstMod.trim());
+            if (option) {
+              firstModifierDetails = {
+                category: modifierCategory.category,
+                optionId: option.id,
+                optionName: option.name,
+                price: option.price / 100, // Convert cents to dollars
+                currency: option.currency || 'USD'
+              };
         break;
       }
     }
-
-    if (!rawMenuItemData) {
-      return createErrorResponse(404, `Raw menu data not found for "${itemName}"`);
-    }
-
-    // Step 5: Validate modification exists in item's modifiers
-    let modifierFound = false;
-    let modifierDetails = null;
-
-    // Create list of modifiers to try
-    const modifiersToTry = [modification]; // Start with exact match
-
-    // If modification ends with " 1" or " 2", also try the base version
-    if (modification.endsWith(' 1') || modification.endsWith(' 2')) {
-      const baseModification = modification.slice(0, -2); // Remove " 1" or " 2"
-      modifiersToTry.push(baseModification);
-    }
-
-    if (rawMenuItemData.modifiers && Object.keys(rawMenuItemData.modifiers).length > 0) {
-      // Search through all modifier lists for this item
-      for (const [modifierListId, modifierList] of Object.entries(rawMenuItemData.modifiers)) {
-        if (!modifierList.options) continue;
-
-        // Try each modifier variation
-        for (const modToTry of modifiersToTry) {
-          const option = modifierList.options.find(opt => opt.name === modToTry);
-          
-          if (option) {
-            modifierFound = true;
-            modifierDetails = {
-              modifierListId: modifierListId,
-              modifierListName: modifierList.name,
-              optionId: option.id,
-              optionName: option.name,
-              price: option.price || 0,
-              currency: option.currency || 'USD'
-            };
-            console.log(`Modifier matched: requested "${modification}", found "${option.name}"${modToTry !== modification ? ' (fallback)' : ''}`);
-            break; // Exit inner loop
-          }
         }
         
-        if (modifierFound) break; // Exit outer loop if found
+        if (firstModifierDetails) {
+          modifiersToApply.push(firstModifierDetails);
+          console.log(`First modifier found: ${firstModifierDetails.optionName} in ${firstModifierDetails.category}`);
+        } else {
+          failedModifiers.push(`${firstMod} (first piece)`);
+          console.warn(`First modifier "${firstMod}" not found for "${itemName}"`);
+        }
       }
     }
 
-    if (!modifierFound) {
-      return createErrorResponse(404, `Modifier "${modification}" not available for "${itemName}"`);
+    // Apply second sandwich modifiers (only for 2PC items)
+    if (secondSandwichMods.length > 0) {
+      if (is2PcItem) {
+        for (const secondMod of secondSandwichMods) {
+          const secondModifierDetails = findModifierInCategory(menuItem, secondMod, "Choose Your Second Sandwich Mods");
+          
+          if (secondModifierDetails) {
+            modifiersToApply.push(secondModifierDetails);
+            console.log(`Second modifier found: ${secondModifierDetails.optionName} in ${secondModifierDetails.category}`);
+          } else {
+            failedModifiers.push(`${secondMod} (second piece)`);
+            console.warn(`Second modifier "${secondMod}" not found for "${itemName}"`);
+          }
+        }
+      } else {
+        console.warn(`Second modifiers ignored for non-2PC item: ${itemName}`);
+        failedModifiers.push(...secondSandwichMods.map(mod => `${mod} (second piece - not applicable)`));
+      }
+    }
+
+    if (modifiersToApply.length === 0) {
+      return createErrorResponse(404, `No valid modifiers found for "${itemName}"`, { 
+        failedModifiers,
+        availableCategories: (menuItem.modifiers || []).map(cat => cat.category)
+      });
     }
 
     // Step 6: Get session cart and find most recent matching item
@@ -693,7 +864,7 @@ module.exports.addModifierToCart = async (event) => {
       return createErrorResponse(404, `No "${itemName}" found in cart to modify. Add the item first.`);
     }
 
-    // Step 7: Add modifier to cart item
+    // Step 7: Add modifiers to cart item
     const cartItem = sessionCart[targetCartItemIndex];
     
     // Initialize modifiers array if it doesn't exist
@@ -701,26 +872,39 @@ module.exports.addModifierToCart = async (event) => {
       cartItem.modifiers = [];
     }
 
+    const addedModifiers = [];
+    const skippedModifiers = [];
+
+    // Apply each modifier
+    for (const modifierDetails of modifiersToApply) {
     // Check if this modifier already exists (prevent duplicates)
     const existingModifier = cartItem.modifiers.find(mod => 
       mod.optionId === modifierDetails.optionId
     );
     
     if (existingModifier) {
-      return createErrorResponse(400, `Modifier "${modifierDetails.optionName}" already applied to this item`);
+        skippedModifiers.push(modifierDetails.optionName);
+        console.warn(`Modifier "${modifierDetails.optionName}" already applied to this item`);
+        continue;
     }
 
     // Add the new modifier
     const newModifier = {
-      modifierListId: modifierDetails.modifierListId,
-      modifierListName: modifierDetails.modifierListName,
+        category: modifierDetails.category,
       optionId: modifierDetails.optionId,
       optionName: modifierDetails.optionName,
-      price: modifierDetails.price / 100, // Convert cents to dollars
+        price: modifierDetails.price, // Already converted to dollars
       currency: modifierDetails.currency
     };
 
     cartItem.modifiers.push(newModifier);
+      addedModifiers.push(newModifier);
+      console.log(`Added modifier: ${newModifier.optionName} to ${itemName}`);
+    }
+
+    if (addedModifiers.length === 0) {
+      return createErrorResponse(400, `All modifiers already applied to this item: ${skippedModifiers.join(', ')}`);
+    }
 
     // Step 8: Recalculate total price
     const modifierTotal = cartItem.modifiers.reduce((sum, mod) => sum + (mod.price || 0), 0);
@@ -729,14 +913,30 @@ module.exports.addModifierToCart = async (event) => {
     // Step 9: Save updated cart
     await saveSessionCart(callId, sessionCart);
 
-    console.log('Modifier added successfully to cart item');
+    console.log('Modifiers added successfully to cart item');
+
+    // Create response message
+    const addedNames = addedModifiers.map(mod => mod.optionName);
+    const totalRequested = firstSandwichMods.length + secondSandwichMods.length;
+    
+    let message;
+    if (addedNames.length === 1) {
+      message = `Added "${addedNames[0]}" to ${itemName}`;
+    } else if (addedNames.length === totalRequested) {
+      message = `Added ${addedNames.length} modifiers to ${itemName}: ${addedNames.join(', ')}`;
+    } else {
+      message = `Added ${addedNames.length} of ${totalRequested} modifiers to ${itemName}: ${addedNames.join(', ')}`;
+    }
 
     return createSuccessResponse({
-      message: `Added "${modifierDetails.optionName}" to ${itemName}`,
-      modifierAdded: {
-        name: modifierDetails.optionName,
-        price: newModifier.price
-      },
+      message: message,
+      modifiersAdded: addedModifiers.map(mod => ({
+        name: mod.optionName,
+        price: mod.price,
+        category: mod.category
+      })),
+      skippedModifiers: skippedModifiers,
+      failedModifiers: failedModifiers,
       newItemTotal: cartItem.lineTotal
     });
 
@@ -746,61 +946,181 @@ module.exports.addModifierToCart = async (event) => {
   }
 };
 
-// Helper function to find menu item by name in location menu object (exact matching only)
-function findMenuItemInLocationMenu(itemName, locationMenu) {
+// Remove modifier from cart
+module.exports.removeModifierFromCart = async (event) => {
+  console.log('[removeModifierFromCart] Starting function...');
+  
   try {
-    console.log(`Searching for item "${itemName}" in location menu`);
-    
-    // Normalize search term
-    const normalizedSearch = itemName.toLowerCase().trim();
-    
-    // Search through all menu items (excluding metadata fields)
-    const metadataFields = ['restaurantName', 'locationID', 'locationName', 'lastUpdated', 'itemCount'];
-    
-    for (const [menuItemName, menuItemData] of Object.entries(locationMenu)) {
-      // Skip metadata fields
-      if (metadataFields.includes(menuItemName)) {
-        continue;
-      }
-      
-      // Normalize menu item name
-      const normalizedMenuName = menuItemName.toLowerCase().trim();
-      
-      // Check for exact match
-      if (normalizedMenuName === normalizedSearch) {
-        console.log(`Found exact match: ${menuItemName}`);
-        
-        // Transform to old format for compatibility
-        return {
-          item_name: menuItemData.name,
-          price_money: {
-            amount: menuItemData.price,
-            currency: menuItemData.currency
-          },
-          square_item_id: menuItemData.variations?.[0]?.itemVariationData?.itemId || '',
-          square_variation_id: menuItemData.variations?.[0]?.id || '',
-          description: menuItemData.description || '',
-          category_id: menuItemData.categoryId || ''
-        };
+    // Parse the request body
+    let body;
+    if (typeof event.body === 'string') {
+      body = JSON.parse(event.body);
+    } else {
+      body = event.body;
+    }
+
+    // Extract call ID
+    const callId = extractCallId(body);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
+    }
+
+    // Extract modifier data from args
+    const itemName = body.args?.itemName;
+    const firstSandwichMods = body.args?.firstSandwichMods || [];
+    const secondSandwichMods = body.args?.secondSandwichMods || [];
+
+    console.log(`[removeModifierFromCart] Call ID: ${callId}, Args:`, { 
+      itemName, 
+      firstSandwichMods,
+      secondSandwichMods
+    });
+
+    // Validate inputs
+    if (!itemName) {
+      return createErrorResponse(400, 'Missing required field: itemName');
+    }
+
+    if (firstSandwichMods.length === 0 && secondSandwichMods.length === 0) {
+      return createErrorResponse(400, 'At least one modifier array (firstSandwichMods or secondSandwichMods) must contain modifiers to remove');
+    }
+
+    // Get session cart
+    const sessionCart = await getSessionCart(callId);
+
+    if (!sessionCart.length) {
+      return createErrorResponse(400, 'Cart is empty');
+    }
+
+    // Find the most recent cart item with matching name (same logic as addModifierToCart)
+    let targetCartItemIndex = -1;
+    for (let i = sessionCart.length - 1; i >= 0; i--) {
+      if (sessionCart[i].item_name === itemName || sessionCart[i].name === itemName) {
+        targetCartItemIndex = i;
+        break;
       }
     }
+
+    if (targetCartItemIndex === -1) {
+      return createErrorResponse(404, `No "${itemName}" found in cart to modify`);
+    }
+
+    const cartItem = sessionCart[targetCartItemIndex];
     
-    // If no exact match, log available items
-    console.log(`No exact match found for: ${itemName}`);
-    console.log('Available menu items:');
-    Object.keys(locationMenu).forEach(key => {
-      if (!metadataFields.includes(key)) {
-        console.log(`  - ${key}`);
+    // Check if item has modifiers
+    if (!cartItem.modifiers || cartItem.modifiers.length === 0) {
+      return createErrorResponse(404, `No modifiers found on "${itemName}"`);
+    }
+
+    // Determine item type for piece-specific targeting
+    const is2PcItem = itemName.includes("(2pc)");
+    const removedModifiers = [];
+    const failedModifiers = [];
+
+    // Process first sandwich modifiers
+    if (firstSandwichMods.length > 0) {
+      for (const modToRemove of firstSandwichMods) {
+        let modifierIndex = -1;
+        
+        if (is2PcItem) {
+          // For 2PC items, only remove from "Choose Your First Sandwich Mods" category
+          modifierIndex = cartItem.modifiers.findIndex(mod => 
+            mod.optionName.trim() === modToRemove.trim() && 
+            mod.category === "Choose Your First Sandwich Mods"
+          );
+        } else {
+          // For single items, find any matching modifier
+          modifierIndex = cartItem.modifiers.findIndex(mod => 
+            mod.optionName.trim() === modToRemove.trim()
+          );
+        }
+
+        if (modifierIndex !== -1) {
+          const removedModifier = cartItem.modifiers.splice(modifierIndex, 1)[0];
+          removedModifiers.push(removedModifier);
+          console.log(`Removed first modifier: ${removedModifier.optionName} from ${removedModifier.category}`);
+        } else {
+          failedModifiers.push(`${modToRemove} (first piece)`);
+          console.warn(`First modifier "${modToRemove}" not found on "${itemName}"`);
+        }
       }
+    }
+
+    // Process second sandwich modifiers (only for 2PC items)
+    if (secondSandwichMods.length > 0) {
+      if (is2PcItem) {
+        for (const modToRemove of secondSandwichMods) {
+          // For 2PC items, only remove from "Choose Your Second Sandwich Mods" category
+          const modifierIndex = cartItem.modifiers.findIndex(mod => 
+            mod.optionName.trim() === modToRemove.trim() && 
+            mod.category === "Choose Your Second Sandwich Mods"
+          );
+
+          if (modifierIndex !== -1) {
+            const removedModifier = cartItem.modifiers.splice(modifierIndex, 1)[0];
+            removedModifiers.push(removedModifier);
+            console.log(`Removed second modifier: ${removedModifier.optionName} from ${removedModifier.category}`);
+          } else {
+            failedModifiers.push(`${modToRemove} (second piece)`);
+            console.warn(`Second modifier "${modToRemove}" not found on "${itemName}"`);
+          }
+        }
+      } else {
+        console.warn(`Second modifiers ignored for non-2PC item: ${itemName}`);
+        failedModifiers.push(...secondSandwichMods.map(mod => `${mod} (second piece - not applicable)`));
+      }
+    }
+
+    if (removedModifiers.length === 0) {
+      const availableModifiers = cartItem.modifiers.map(mod => `${mod.optionName} (${mod.category})`);
+      return createErrorResponse(404, 
+        `No specified modifiers found on "${itemName}"`, 
+        { 
+          failedModifiers,
+          availableModifiers
+        }
+      );
+    }
+
+    // Recalculate total price
+    const modifierTotal = cartItem.modifiers.reduce((sum, mod) => sum + (mod.price || 0), 0);
+    cartItem.lineTotal = (cartItem.unitPrice + modifierTotal) * cartItem.quantity;
+
+    // Save updated cart
+    await saveSessionCart(callId, sessionCart);
+
+    console.log('Modifiers removed successfully from cart item');
+
+    // Create response message
+    const removedNames = removedModifiers.map(mod => mod.optionName);
+    const totalRequested = firstSandwichMods.length + secondSandwichMods.length;
+    
+    let message;
+    if (removedNames.length === 1) {
+      message = `Removed "${removedNames[0]}" from ${itemName}`;
+    } else if (removedNames.length === totalRequested) {
+      message = `Removed ${removedNames.length} modifiers from ${itemName}: ${removedNames.join(', ')}`;
+    } else {
+      message = `Removed ${removedNames.length} of ${totalRequested} modifiers from ${itemName}: ${removedNames.join(', ')}`;
+    }
+
+    return createSuccessResponse({
+      message: message,
+      modifiersRemoved: removedModifiers.map(mod => ({
+        name: mod.optionName,
+        price: mod.price,
+        category: mod.category
+      })),
+      failedModifiers: failedModifiers,
+      newItemTotal: cartItem.lineTotal
     });
-    
-    return null;
-    
+
   } catch (error) {
-    console.error('Error finding menu item in location menu:', error);
-    throw error;
+    console.error('Error removing modifier from cart:', error);
+    return createErrorResponse(500, 'Internal server error', { details: error.message });
   }
-}
+};
+
 
 // Helper function to create success response
 function createSuccessResponse(data) {
