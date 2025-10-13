@@ -111,7 +111,7 @@ function buildOrderingMessage(restaurantData) {
   }
   
   // Add "powered by Yapn AI" at the bottom
-  message += `\n\nPowered by Yapn AI`;
+  message += `\n\nPowered by www.yapn.ai`;
   
   return message;
 }
@@ -136,8 +136,8 @@ module.exports.sendOrderingLink = async (event) => {
       requestBody = event.body || {};
     }
 
-    // Extract locationId from request (optional now)
-    let locationId = requestBody.locationId;
+    // Extract locationId from query parameters (sent by Retell via dynamic variable)
+    let locationId = event.queryStringParameters?.locationID;
     
     // Extract customer phone number from Retell call data
     const customerPhone = extractCustomerPhoneNumber(requestBody);

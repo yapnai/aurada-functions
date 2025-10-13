@@ -201,6 +201,14 @@ functions:
           method: post
     timeout: 30
 
+  sendContract:
+    handler: contract.sendContract
+    events:
+      - httpApi:
+          path: /send-contract
+          method: post
+    timeout: 30
+
 resources:
   Resources:
     # Only stage-specific tables are managed by CloudFormation
