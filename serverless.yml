@@ -209,6 +209,38 @@ functions:
           method: post
     timeout: 30
 
+  sendJobLink:
+    handler: jobLink.sendJobLink
+    events:
+      - httpApi:
+          path: /send-job-link
+          method: post
+    timeout: 30
+
+  sendRewardsLink:
+    handler: rewardsLink.sendRewardsLink
+    events:
+      - httpApi:
+          path: /send-rewards-link
+          method: post
+    timeout: 30
+
+  sendSchedulingLink:
+    handler: schedulingLink.sendSchedulingLink
+    events:
+      - httpApi:
+          path: /send-scheduling-link
+          method: post
+    timeout: 30
+
+  sendLocation:
+    handler: sendLocation.sendLocation
+    events:
+      - httpApi:
+          path: /send-location
+          method: post
+    timeout: 30
+
 resources:
   Resources:
     # Only stage-specific tables are managed by CloudFormation
@@ -266,6 +298,188 @@ resources:
     # Legacy tables removed:
     # - restaurant-catalog (deleted)
     # - redbird-menu (deleted)
+
+    # ============================================
+    # CLOUDWATCH ALARMS FOR ERROR MONITORING
+    # ============================================
+    
+    # SNS Topic for alarm notifications
+    ErrorAlarmTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-alerts-${self:provider.stage}
+        DisplayName: Yapn Error Alerts
+        Subscription:
+          - Endpoint: laith@yapn.ai
+            Protocol: email
+
+    # ============================================
+    # INBOUND WEBHOOK - CRITICAL PRIORITY
+    # ============================================
+    InboundWebhookErrorMetricFilter:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        FilterPattern: "ERROR"
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-handleInboundCall
+        MetricTransformations:
+          - MetricName: InboundWebhookErrors
+            MetricNamespace: Yapn/CustomMetrics
+            MetricValue: "1"
+
+    InboundWebhookErrorAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-inbound-webhook-errors-${self:provider.stage}
+        AlarmDescription: "CRITICAL: Inbound webhook failing - customers cannot call"
+        MetricName: InboundWebhookErrors
+        Namespace: Yapn/CustomMetrics
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Ref: ErrorAlarmTopic
+
+    # ============================================
+    # SMS LINK FUNCTIONS - MEDIUM PRIORITY
+    # ============================================
+    
+    # Ordering Link
+    OrderingLinkErrorMetricFilter:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        FilterPattern: "ERROR"
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-sendOrderingLink
+        MetricTransformations:
+          - MetricName: OrderingLinkErrors
+            MetricNamespace: Yapn/CustomMetrics
+            MetricValue: "1"
+
+    OrderingLinkErrorAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-ordering-link-errors-${self:provider.stage}
+        AlarmDescription: "Ordering link SMS failing"
+        MetricName: OrderingLinkErrors
+        Namespace: Yapn/CustomMetrics
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 2
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Ref: ErrorAlarmTopic
+
+    # Job Link
+    JobLinkErrorMetricFilter:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        FilterPattern: "ERROR"
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-sendJobLink
+        MetricTransformations:
+          - MetricName: JobLinkErrors
+            MetricNamespace: Yapn/CustomMetrics
+            MetricValue: "1"
+
+    JobLinkErrorAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-job-link-errors-${self:provider.stage}
+        AlarmDescription: "Job link SMS failing"
+        MetricName: JobLinkErrors
+        Namespace: Yapn/CustomMetrics
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 2
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Ref: ErrorAlarmTopic
+
+    # Rewards Link
+    RewardsLinkErrorMetricFilter:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        FilterPattern: "ERROR"
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-sendRewardsLink
+        MetricTransformations:
+          - MetricName: RewardsLinkErrors
+            MetricNamespace: Yapn/CustomMetrics
+            MetricValue: "1"
+
+    RewardsLinkErrorAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-rewards-link-errors-${self:provider.stage}
+        AlarmDescription: "Rewards link SMS failing"
+        MetricName: RewardsLinkErrors
+        Namespace: Yapn/CustomMetrics
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 2
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Ref: ErrorAlarmTopic
+
+    # Scheduling Link
+    SchedulingLinkErrorMetricFilter:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        FilterPattern: "ERROR"
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-sendSchedulingLink
+        MetricTransformations:
+          - MetricName: SchedulingLinkErrors
+            MetricNamespace: Yapn/CustomMetrics
+            MetricValue: "1"
+
+    SchedulingLinkErrorAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-scheduling-link-errors-${self:provider.stage}
+        AlarmDescription: "Scheduling link SMS failing"
+        MetricName: SchedulingLinkErrors
+        Namespace: Yapn/CustomMetrics
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 2
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Ref: ErrorAlarmTopic
+
+    # Location SMS
+    LocationErrorMetricFilter:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        FilterPattern: "ERROR"
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-sendLocation
+        MetricTransformations:
+          - MetricName: LocationErrors
+            MetricNamespace: Yapn/CustomMetrics
+            MetricValue: "1"
+
+    LocationErrorAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-location-errors-${self:provider.stage}
+        AlarmDescription: "Location SMS failing"
+        MetricName: LocationErrors
+        Namespace: Yapn/CustomMetrics
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 2
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Ref: ErrorAlarmTopic
 
 plugins:
   - serverless-offline

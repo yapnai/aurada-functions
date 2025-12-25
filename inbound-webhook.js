@@ -21,7 +21,12 @@ function parseHours(hoursString) {
   const [closeHour, closeMin] = closeStr.split(':').map(Number);
   
   const openTime = openHour * 60 + openMin;
-  const closeTime = closeHour * 60 + closeMin;
+  let closeTime = closeHour * 60 + closeMin;
+  
+  // Handle midnight: "00:00" should be treated as end of day (1440 minutes)
+  if (closeTime === 0) {
+    closeTime = 1440;
+  }
   
   return { openTime, closeTime };
 }
@@ -56,7 +61,7 @@ function formatWeeklyHoursForSpeech(restaurantHours) {
   
   dayNames.forEach((dayName) => {
     const dayHours = restaurantHours[dayName];
-    if (dayHours) {
+    if (dayHours && dayHours.toUpperCase() !== 'CLOSED') {
       const formattedRange = formatHoursForSpeech(dayHours);
       formattedHours.push(`${dayName}: ${formattedRange}`);
     } else {
@@ -64,25 +69,178 @@ function formatWeeklyHoursForSpeech(restaurantHours) {
     }
   });
   
-  return formattedHours.join(', ');
+  return formattedHours.join('\n');
+}
+
+// Helper function to get today's date in MM/DD format
+function getTodayDateString(timeZone) {
+  const now = new Date();
+  const localTime = new Date(now.toLocaleString("en-US", {timeZone: timeZone}));
+  const month = (localTime.getMonth() + 1).toString(); // No padding
+  const day = localTime.getDate().toString(); // No padding
+  return `${month}/${day}`;
+}
+
+// Helper function to find if today is a holiday
+function findTodayHoliday(holidayHours, timeZone) {
+  if (!holidayHours || !Array.isArray(holidayHours) || holidayHours.length === 0) {
+    return null;
+  }
+  
+  const todayDate = getTodayDateString(timeZone);
+  const holiday = holidayHours.find(h => h.date === todayDate);
+  
+  return holiday || null;
+}
+
+// Helper function to format all holiday hours for speech
+function formatHolidayHoursForSpeech(holidayHours) {
+  if (!holidayHours || !Array.isArray(holidayHours) || holidayHours.length === 0) {
+    return 'No special holiday hours';
+  }
+  
+  const formattedHolidays = holidayHours.map(holiday => {
+    const hoursText = holiday.hours.toUpperCase() === 'CLOSED' 
+      ? 'CLOSED' 
+      : formatHoursForSpeech(holiday.hours);
+    
+    return `${holiday.name} on ${holiday.date}: ${hoursText}`;
+  });
+  
+  return formattedHolidays.join(', ');
+}
+
+// Helper function to get upcoming holidays within the next N days
+function getUpcomingHolidays(holidayHours, timeZone, daysAhead = 14) {
+  if (!holidayHours || !Array.isArray(holidayHours) || holidayHours.length === 0) {
+    return [];
+  }
+  
+  const now = new Date();
+  const localTime = new Date(now.toLocaleString("en-US", {timeZone: timeZone}));
+  
+  const upcomingHolidays = [];
+  
+  // Check each day in the next daysAhead days
+  for (let i = 0; i <= daysAhead; i++) {
+    const checkDate = new Date(localTime);
+    checkDate.setDate(localTime.getDate() + i);
+    
+    const month = (checkDate.getMonth() + 1).toString();
+    const day = checkDate.getDate().toString();
+    const dateString = `${month}/${day}`;
+    
+    // Find if this date is a holiday
+    const holiday = holidayHours.find(h => h.date === dateString);
+    
+    if (holiday) {
+      // Determine relative label with day name and date
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const dayName = dayNames[checkDate.getDay()];
+      
+      let relativeLabel;
+      if (i === 0) {
+        relativeLabel = `Today (${dayName} ${dateString})`;
+      } else if (i === 1) {
+        relativeLabel = `Tomorrow (${dayName} ${dateString})`;
+      } else {
+        relativeLabel = `${dayName} (${dateString})`;
+      }
+      
+      // Format hours text
+      const hoursText = holiday.hours.toUpperCase() === 'CLOSED' 
+        ? 'CLOSED' 
+        : `Special hours ${formatHoursForSpeech(holiday.hours)}`;
+      
+      upcomingHolidays.push({
+        date: holiday.date,
+        name: holiday.name,
+        relativeLabel: relativeLabel,
+        hoursText: hoursText,
+        daysFromNow: i
+      });
+    }
+  }
+  
+  return upcomingHolidays;
+}
+
+// Helper function to format upcoming holidays for inclusion in store_hours
+function formatUpcomingHolidaysForStoreHours(holidayHours, timeZone) {
+  const upcomingHolidays = getUpcomingHolidays(holidayHours, timeZone, 14);
+  
+  if (upcomingHolidays.length === 0) {
+    return '';
+  }
+  
+  const formattedLines = upcomingHolidays.map(holiday => {
+    return `${holiday.relativeLabel}: ${holiday.hoursText} for ${holiday.name}`;
+  });
+  
+  return 'UPCOMING CLOSURES AND SPECIAL HOURS:\n' + formattedLines.join('\n') + '\n\n';
 }
 
 // Helper function to calculate store status based on dynamic hours
-function calculateDynamicStoreStatus(restaurantHours) {
+function calculateDynamicStoreStatus(restaurantHours, holidayHours, timeZone) {
   try {
-    // Get current time in Eastern Time
+    // Get current time in restaurant's timezone
     const now = new Date();
-    const easternTime = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
+    const localTime = new Date(now.toLocaleString("en-US", {timeZone: timeZone}));
     
-    const dayOfWeek = easternTime.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+    // PRIORITY 1: Check if today is a holiday
+    const todayHoliday = findTodayHoliday(holidayHours, timeZone);
+    
+    if (todayHoliday) {
+      console.log(`Today is a holiday: ${todayHoliday.name} with hours: ${todayHoliday.hours}`);
+      
+      // Format weekly hours
+      const weeklyHoursFormatted = formatWeeklyHoursForSpeech(restaurantHours || {});
+      
+      // Prepend upcoming holidays to store hours
+      const upcomingHolidaysSection = formatUpcomingHolidaysForStoreHours(holidayHours, timeZone);
+      const fullStoreHours = upcomingHolidaysSection + weeklyHoursFormatted;
+      
+      if (todayHoliday.hours.toUpperCase() === 'CLOSED') {
+        return {
+          status: "store is closed. You cannot order at this time. Please call back when we are open to place an order.",
+          allHours: fullStoreHours
+        };
+      }
+      
+      // Parse holiday hours
+      const parsedHours = parseHours(todayHoliday.hours);
+      if (!parsedHours) {
+        return {
+          status: "store hours not available.",
+          allHours: fullStoreHours
+        };
+      }
+      
+      // Check if currently open using holiday hours
+      const currentTimeInMinutes = localTime.getHours() * 60 + localTime.getMinutes();
+      console.log(`Holiday: ${todayHoliday.name}, Hours: ${todayHoliday.hours}, Current: ${currentTimeInMinutes}`);
+      const isOpen = currentTimeInMinutes >= parsedHours.openTime && currentTimeInMinutes < parsedHours.closeTime;
+      
+      const status = isOpen 
+        ? "store is open." 
+        : "store is closed. You cannot order at this time. Please call back when we are open to place an order.";
+      
+      return {
+        status: status,
+        allHours: fullStoreHours
+      };
+    }
+    
+    // PRIORITY 2: If not a holiday, continue with existing day-of-week logic
+    const dayOfWeek = localTime.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const todayName = dayNames[dayOfWeek];
     
     // Get today's hours
     const todayHours = restaurantHours?.[todayName];
-    if (!todayHours) {
+    if (!todayHours || todayHours.toUpperCase() === 'CLOSED') {
       return {
-        status: "store hours not available.",
+        status: "store is closed. You cannot order at this time. Please call back when we are open to place an order.",
         allHours: formatWeeklyHoursForSpeech(restaurantHours || {})
       };
     }
@@ -97,18 +255,24 @@ function calculateDynamicStoreStatus(restaurantHours) {
     }
     
     // Check if currently open
-    const currentTimeInMinutes = easternTime.getHours() * 60 + easternTime.getMinutes();
+    const currentTimeInMinutes = localTime.getHours() * 60 + localTime.getMinutes();
+    console.log(`Day: ${todayName}, Hours string: ${todayHours}, Parsed: open=${parsedHours.openTime}, close=${parsedHours.closeTime}, Current: ${currentTimeInMinutes}`);
     const isOpen = currentTimeInMinutes >= parsedHours.openTime && currentTimeInMinutes < parsedHours.closeTime;
     
     const status = isOpen ? 
       "store is open." : 
       "store is closed. You cannot order at this time. Please call back when we are open to place an order.";
-      
+    
+    // Format weekly hours
     const allHoursFormatted = formatWeeklyHoursForSpeech(restaurantHours || {});
+    
+    // Prepend upcoming holidays to store hours
+    const upcomingHolidaysSection = formatUpcomingHolidaysForStoreHours(holidayHours, timeZone);
+    const fullStoreHours = upcomingHolidaysSection + allHoursFormatted;
     
     return {
       status: status,
-      allHours: allHoursFormatted
+      allHours: fullStoreHours
     };
   } catch (error) {
     console.warn('Error calculating store status:', error.message);
@@ -210,9 +374,10 @@ module.exports.handleInboundCall = async (event) => {
     }
 
     // Step 3: Calculate dynamic store status using database hours
+    const timeZone = restaurantData?.timeZone || "America/New_York";
     let storeInfo;
     try {
-      storeInfo = calculateDynamicStoreStatus(restaurantData.hours);
+      storeInfo = calculateDynamicStoreStatus(restaurantData.hours, restaurantData.holidayHours, timeZone);
       console.log('Store status calculated:', storeInfo.status);
     } catch (error) {
       console.warn('Store status calculation failed:', error.message);
@@ -228,6 +393,14 @@ module.exports.handleInboundCall = async (event) => {
       menuItemNames = [];
     }
 
+    // Step 5: Format holiday hours for the dynamic variable
+    let holidayHoursFormatted = 'No special holiday hours';
+    try {
+      holidayHoursFormatted = formatHolidayHoursForSpeech(restaurantData.holidayHours);
+    } catch (error) {
+      console.warn('Holiday hours formatting failed:', error.message);
+    }
+
     // Return the response with enhanced dynamic variables
     const response = {
       call_inbound: {
@@ -240,7 +413,8 @@ module.exports.handleInboundCall = async (event) => {
           greeting_phrase: restaurantData?.greetingPhrase || '',
           menu_item_names: menuItemNames?.join(', ') || 'Menu not available',
           store_status: storeInfo?.status || 'Store status unavailable',
-          store_hours: storeInfo?.allHours || 'Hours not available'
+          store_hours: storeInfo?.allHours || 'Hours not available',
+          holiday_hours: holidayHoursFormatted
         },
         metadata: {
           request_timestamp: new Date().toISOString()

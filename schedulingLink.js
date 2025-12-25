@@ -8,7 +8,7 @@ AWS.config.update({
 const secretsManager = new AWS.SecretsManager();
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
-const CLIENT_DATABASE_TABLE = process.env.CLIENT_DATABASE_TABLE || 'clientDatabase';
+const CLIENT_DATABASE_TABLE = 'clientDatabase';
 const PHONE_NUMBER_CLIENT_MAP_TABLE = 'phoneNumberClientMap';
 
 // Function to extract customer phone number from Retell call data
@@ -53,8 +53,8 @@ async function getLocationFromPhoneNumber(phoneNumber) {
   }
 }
 
-// Function to get restaurant ordering data from clientDatabase
-async function getRestaurantOrderingData(locationId) {
+// Function to get restaurant data from clientDatabase
+async function getRestaurantData(locationId) {
   if (!locationId) {
     throw new Error('Location ID is required');
   }
@@ -80,34 +80,22 @@ async function getRestaurantOrderingData(locationId) {
   }
 }
 
-// Function to build dynamic ordering message
-function buildOrderingMessage(restaurantData) {
+// Function to build dynamic scheduling message
+function buildSchedulingMessage(restaurantData) {
   const restaurantName = restaurantData.restaurantName || 'Restaurant';
   
   // Base greeting
-  let message = `Thank you for calling ${restaurantName}!`;
+  let message = `Thank you for your interest in scheduling an appointment at ${restaurantName}!`;
   
-  // Get order links
-  const orderLinks = restaurantData.orderLinks;
-  const pickupLink = orderLinks?.pickupLink;
-  const deliveryLinks = orderLinks?.deliveryLinks;
+  // Get scheduling link
+  const schedulingLink = restaurantData.schedulingLink;
   
-  // Add pickup section if link exists
-  if (pickupLink) {
-    message += ` To place a pick-up order please visit us at ${pickupLink}`;
-  }
-  
-  // Add delivery section if links exist
-  if (deliveryLinks && Array.isArray(deliveryLinks) && deliveryLinks.length > 0) {
-    message += `\n\nIf you'd like your order delivered to your doorstep visit us at:`;
-    deliveryLinks.forEach(link => {
-      message += `\n${link}`;
-    });
-  }
-  
-  // Fallback if no links available
-  if (!pickupLink && (!deliveryLinks || deliveryLinks.length === 0)) {
-    message += ` Please call us directly to place your order.`;
+  // Add scheduling section if link exists
+  if (schedulingLink) {
+    message += ` To book your appointment, please visit us at ${schedulingLink}`;
+  } else {
+    // Fallback if no scheduling link available
+    message += ` Please call us directly to schedule your appointment.`;
   }
   
   // Add "powered by Yapn AI" at the bottom
@@ -116,9 +104,9 @@ function buildOrderingMessage(restaurantData) {
   return message;
 }
 
-// Function to send ordering links via SMS
-module.exports.sendOrderingLink = async (event) => {
-  console.log('Processing ordering link SMS request...');
+// Function to send scheduling links via SMS
+module.exports.sendSchedulingLink = async (event) => {
+  console.log('Processing scheduling link SMS request...');
   
   try {
     // Essential logging
@@ -163,12 +151,12 @@ module.exports.sendOrderingLink = async (event) => {
       }
     }
 
-    console.log(`Processing order links for location: ${locationId}, customer: ${customerPhone}`);
+    console.log(`Processing scheduling links for location: ${locationId}, customer: ${customerPhone}`);
 
     // Get restaurant data from database
     let restaurantData;
     try {
-      restaurantData = await getRestaurantOrderingData(locationId);
+      restaurantData = await getRestaurantData(locationId);
     } catch (error) {
       if (error.message.includes('No restaurant found')) {
         return createErrorResponse(404, `Restaurant not found for location: ${locationId}`);
@@ -177,21 +165,21 @@ module.exports.sendOrderingLink = async (event) => {
     }
 
     // Build dynamic message
-    const dynamicMessage = buildOrderingMessage(restaurantData);
+    const dynamicMessage = buildSchedulingMessage(restaurantData);
 
     // Send SMS with dynamic message
-    const smsResult = await sendOrderingLinkSMS(customerPhone, dynamicMessage, restaurantData.restaurantName);
-    console.log('✅ Dynamic ordering links SMS sent successfully');
+    const smsResult = await sendSchedulingLinkSMS(customerPhone, dynamicMessage, restaurantData.restaurantName);
+    console.log('✅ Dynamic scheduling links SMS sent successfully');
 
     return createSuccessResponse({
       success: true,
-      message: 'Ordering links sent successfully',
+      message: 'Scheduling links sent successfully',
       restaurantName: restaurantData.restaurantName,
       smsResult: smsResult
     });
 
   } catch (error) {
-    console.error('Error in ordering link workflow:', error.message);
+    console.error('Error in scheduling link workflow:', error.message);
     console.error('Error stack:', error.stack);
     
     return createErrorResponse(500, 'Internal server error', { 
@@ -201,8 +189,8 @@ module.exports.sendOrderingLink = async (event) => {
   }
 };
 
-// Function to send ordering links SMS using TextBelt
-async function sendOrderingLinkSMS(phoneNumber, message, restaurantName) {
+// Function to send scheduling links SMS using TextBelt
+async function sendSchedulingLinkSMS(phoneNumber, message, restaurantName) {
   return new Promise(async (resolve, reject) => {
     try {
       // Get TextBelt API key from Secrets Manager
@@ -239,20 +227,10 @@ async function sendOrderingLinkSMS(phoneNumber, message, restaurantName) {
         res.on('end', () => {
           try {
             const result = JSON.parse(data);
-            console.log('TextBelt response:', JSON.stringify(result));
-            
             if (result.success) {
               resolve(result);
             } else {
-              // Check if quota is exceeded
-              if (result.quotaRemaining === 0) {
-                reject(new Error('TextBelt quota exceeded - no SMS credits remaining'));
-              } else if (result.error) {
-                reject(new Error(`TextBelt error: ${result.error}`));
-              } else {
-                // Fallback for any other error
-                reject(new Error(`TextBelt API returned an error. Response: ${JSON.stringify(result)}`));
-              }
+              reject(new Error(`TextBelt error: ${result.error}`));
             }
           } catch (parseError) {
             reject(new Error(`Failed to parse TextBelt response: ${data}`));

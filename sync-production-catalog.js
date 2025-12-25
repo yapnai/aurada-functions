@@ -2,6 +2,12 @@
 require('dotenv').config();
 const AWS = require('aws-sdk');
 const { SquareClient, SquareEnvironment } = require('square');
+const fs = require('fs');
+const path = require('path');
+
+// Parse command line arguments
+const args = process.argv.slice(2);
+const writeToFile = args.includes('--file') || args.includes('-f');
 
 // Configure AWS
 AWS.config.update({ region: 'us-east-1' });
@@ -290,44 +296,92 @@ async function syncProductionCatalog(restaurantId = 'redbird-prod') {
       itemsProcessed++;
     }
     
-    // 9. Store all location menus in DynamoDB
+    // 9. Store all location menus (DynamoDB or JSON file based on flag)
     let totalLocationsStored = 0;
     let totalItemsStored = 0;
     
-    for (const [locationId, locationData] of Object.entries(locationMenus)) {
-      const location = locationData.locationData;
-      const menu = locationData.menu;
-      const itemCount = Object.keys(menu).length;
+    if (writeToFile) {
+      // Write to local JSON file
+      console.log('📁 Writing menu data to local JSON file...');
       
-      console.log(`📊 ${location.name} menu has ${itemCount} items`);
-      
-      if (itemCount > 0) {
-        console.log(`💾 Storing ${location.name} menu with ${itemCount} items`);
+      const outputData = {
+        restaurantName: restaurantName,
+        syncTimestamp: new Date().toISOString(),
+        totalLocations: Object.keys(locationMenus).length,
+        totalItems: Object.values(locationMenus).reduce((sum, loc) => sum + Object.keys(loc.menu).length, 0),
+        locations: {}
+      };
+
+      for (const [locationId, locationData] of Object.entries(locationMenus)) {
+        const location = locationData.locationData;
+        const menu = locationData.menu;
+        const itemCount = Object.keys(menu).length;
         
-        const dbItem = {
-          restaurantName: restaurantName,
-          locationID: location.id,
+        console.log(`📊 ${location.name} menu has ${itemCount} items`);
+        
+        outputData.locations[locationId] = {
           locationName: location.name,
-          lastUpdated: new Date().toISOString(),
+          locationId: locationId,
           itemCount: itemCount,
-          ...menu // Spread all menu items as individual attributes
+          menu: menu
         };
         
-        const params = {
-          TableName: CLIENT_MENU_TABLE,
-          Item: dbItem
-        };
+        totalLocationsStored++;
+        totalItemsStored += itemCount;
+      }
+
+      // Write to local JSON file
+      const outputFile = `menu-sync-${restaurantName.replace(/[^a-zA-Z0-9]/g, '-')}-${new Date().toISOString().split('T')[0]}.json`;
+      const outputPath = path.join(__dirname, outputFile);
+
+      try {
+        fs.writeFileSync(outputPath, JSON.stringify(outputData, null, 2));
+        console.log(`✅ Menu data written to: ${outputFile}`);
+        console.log(`📁 File location: ${outputPath}`);
+      } catch (error) {
+        console.error(`❌ Error writing JSON file:`, error);
+        throw error;
+      }
+      
+    } else {
+      // Write to DynamoDB (original behavior)
+      console.log('💾 Writing menu data to DynamoDB...');
+      
+      for (const [locationId, locationData] of Object.entries(locationMenus)) {
+        const location = locationData.locationData;
+        const menu = locationData.menu;
+        const itemCount = Object.keys(menu).length;
         
-        try {
-          await dynamodb.put(params).promise();
-          console.log(`✅ Successfully stored ${location.name} menu!`);
-          totalLocationsStored++;
-          totalItemsStored += itemCount;
-        } catch (error) {
-          console.error(`❌ Error storing ${location.name} menu:`, error);
+        console.log(`📊 ${location.name} menu has ${itemCount} items`);
+        
+        if (itemCount > 0) {
+          console.log(`💾 Storing ${location.name} menu with ${itemCount} items`);
+          
+          const dbItem = {
+            restaurantName: restaurantName,
+            locationID: location.id,
+            locationName: location.name,
+            lastUpdated: new Date().toISOString(),
+            itemCount: itemCount,
+            ...menu // Spread all menu items as individual attributes
+          };
+          
+          const params = {
+            TableName: CLIENT_MENU_TABLE,
+            Item: dbItem
+          };
+          
+          try {
+            await dynamodb.put(params).promise();
+            console.log(`✅ Successfully stored ${location.name} menu!`);
+            totalLocationsStored++;
+            totalItemsStored += itemCount;
+          } catch (error) {
+            console.error(`❌ Error storing ${location.name} menu:`, error);
+          }
+        } else {
+          console.log(`⚠️ No items found for ${location.name} location`);
         }
-      } else {
-        console.log(`⚠️ No items found for ${location.name} location`);
       }
     }
     
@@ -341,4 +395,10 @@ async function syncProductionCatalog(restaurantId = 'redbird-prod') {
 }
 
 // Run the sync (you can pass a different restaurantId if needed)
+console.log(`🚀 Starting sync with output mode: ${writeToFile ? 'JSON file' : 'DynamoDB'}`);
+if (writeToFile) {
+  console.log('💡 Usage: node sync-production-catalog.js --file (or -f) to write to JSON file');
+  console.log('💡 Usage: node sync-production-catalog.js (no flag) to write to DynamoDB');
+}
+
 syncProductionCatalog('The Red Bird Hot Chicken & Fries'); 
