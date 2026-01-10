@@ -63,6 +63,11 @@ provider:
             - arn:aws:dynamodb:${self:provider.region}:*:table/square-merchants
         - Effect: Allow
           Action:
+            - dynamodb:Query
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/square-merchants-v2
+        - Effect: Allow
+          Action:
             - dynamodb:GetItem
             - dynamodb:PutItem
             - dynamodb:UpdateItem
@@ -77,6 +82,7 @@ provider:
         - Effect: Allow
           Action:
             - dynamodb:GetItem
+            - dynamodb:Scan
           Resource:
             - arn:aws:dynamodb:${self:provider.region}:*:table/clientDatabase
         - Effect: Allow
@@ -240,6 +246,16 @@ functions:
           path: /send-location
           method: post
     timeout: 30
+
+  syncKbMenus:
+    handler: sync-kb-menus.handler
+    timeout: 900  # 15 minutes for processing multiple locations
+    events:
+      - schedule:
+          rate: cron(0 3 * * ? *)  # 3am UTC daily
+          enabled: true
+    environment:
+      RETELL_API_KEY: ${env:RETELL_API_KEY}
 
 resources:
   Resources:

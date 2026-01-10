@@ -15,7 +15,7 @@ let oauthCredentials = null;
 
 // Table names
 const OAUTH_STATE_TABLE = process.env.OAUTH_STATE_TABLE || 'square-oauth-state';
-const MERCHANTS_TABLE = process.env.MERCHANTS_TABLE || 'square-merchants';
+const MERCHANTS_TABLE = process.env.MERCHANTS_TABLE || 'square-merchants-v2';
 
 // Function to get Square OAuth credentials from AWS Secrets Manager
 async function getOAuthCredentials() {
@@ -408,10 +408,16 @@ async function getLocationInfo(accessToken, credentials) {
 
 // Helper function to store merchant data
 async function storeMerchantData(restaurantId, tokenData, merchantInfo, locationData) {
+  // Generate SK from merchant_id to ensure uniqueness
+  // restaurantId is the groupId (e.g., FALAFEL_INC_GROUP)
+  // SK will be a unique identifier for this specific merchant account
+  const merchantSK = `MERCHANT_${tokenData.merchant_id}`;
+  
   const params = {
     TableName: MERCHANTS_TABLE,
     Item: {
-      PK: restaurantId,
+      PK: restaurantId,                      // Group ID (from authorize link)
+      SK: merchantSK,                        // Unique merchant identifier
       merchant_id: tokenData.merchant_id,
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
@@ -421,7 +427,6 @@ async function storeMerchantData(restaurantId, tokenData, merchantInfo, location
       updated_at: new Date().toISOString(),
       status: 'active',
       business_name: merchantInfo.businessName,
-      merchant_id: merchantInfo.merchantId,
       country: merchantInfo.country,
       currency: merchantInfo.currency,
       locations: locationData.map(loc => ({

@@ -110,6 +110,420 @@ function formatHolidayHoursForSpeech(holidayHours) {
   return formattedHolidays.join(', ');
 }
 
+// Helper function to get the Nth occurrence of a weekday in a month
+function getNthWeekdayOfMonth(year, month, weekday, n) {
+  // weekday: 0=Sunday, 1=Monday, ..., 6=Saturday
+  // n: 1=first, 2=second, 3=third, 4=fourth
+  
+  // Start at the 1st day of the month
+  const date = new Date(year, month, 1);
+  
+  // Find the first occurrence of the desired weekday
+  while (date.getDay() !== weekday) {
+    date.setDate(date.getDate() + 1);
+  }
+  
+  // Now jump forward (n-1) weeks
+  date.setDate(date.getDate() + (n - 1) * 7);
+  
+  return date.getDate(); // Returns day number
+}
+
+// Helper function to get the last occurrence of a weekday in a month
+function getLastWeekdayOfMonth(year, month, weekday) {
+  // weekday: 0=Sunday, 1=Monday, ..., 6=Saturday
+  
+  // Start at the last day of the month
+  const date = new Date(year, month + 1, 0); // Day 0 = last day of previous month
+  
+  // Walk backwards until we find the desired weekday
+  while (date.getDay() !== weekday) {
+    date.setDate(date.getDate() - 1);
+  }
+  
+  return date.getDate(); // Returns day number
+}
+
+// Helper function to calculate Easter date using Computus algorithm (Anonymous Gregorian algorithm)
+function calculateEaster(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31) - 1; // 0-indexed month
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  
+  return { month, day };
+}
+
+// Helper function to get holiday greeting based on current date
+function getHolidayGreeting(timeZone) {
+  try {
+    // Get current date in restaurant's timezone
+    const now = new Date();
+    const localTime = new Date(now.toLocaleString("en-US", {timeZone: timeZone}));
+    
+    const year = localTime.getFullYear();
+    const month = localTime.getMonth(); // 0-indexed (0=Jan, 11=Dec)
+    const day = localTime.getDate();
+    
+    // PRIORITY 1: Check fixed date holidays first (most specific)
+    
+    // January
+    if (month === 0 && day >= 1 && day <= 11) return "Happy New Year!";
+    
+    // February
+    if (month === 1 && day >= 6 && day <= 8) return "Happy Super Bowl Weekend!";
+    if (month === 1 && day === 9) return "Happy National Pizza Day!";
+    if (month === 1 && day >= 10 && day <= 14) return "Happy Valentine's Day!";
+    
+    // March
+    if (month === 2 && day === 14) return "Happy Pi Day!";
+    if (month === 2 && day === 17) return "Happy St. Patrick's Day!";
+    
+    // April
+    if (month === 3 && day === 22) return "Happy Earth Day!";
+    
+    // May
+    if (month === 4 && day === 5) return "Happy Cinco de Mayo!";
+    
+    // July
+    if (month === 6 && day === 4) return "Happy Fourth of July!";
+    
+    // October
+    if (month === 9 && day === 31) return "Happy Halloween!";
+    
+    // November
+    if (month === 10 && day === 11) return "Happy Veterans Day!";
+    
+    // December
+    if (month === 11 && day === 31) return "Happy New Year's Eve!";
+    
+    // PRIORITY 2: Check calculated variable date holidays
+    
+    // MLK Day Weekend (3rd Monday of January, plus surrounding days)
+    if (month === 0) {
+      const mlkDay = getNthWeekdayOfMonth(year, 0, 1, 3); // 1=Monday
+      if (day >= mlkDay - 1 && day <= mlkDay + 1) return "Happy MLK Day Weekend!";
+    }
+    
+    // Super Bowl Sunday (1st Sunday of February)
+    if (month === 1) {
+      const superBowlDay = getNthWeekdayOfMonth(year, 1, 0, 1); // 0=Sunday
+      if (day === superBowlDay) return "Happy Super Bowl Sunday!";
+    }
+    
+    // Lunar New Year (varies by year - lunar calendar based)
+    // 2026: Feb 17, 2027: Feb 6, 2028: Jan 26
+    const lunarNewYearDates = {
+      2026: { month: 1, day: 17 },
+      2027: { month: 1, day: 6 },
+      2028: { month: 0, day: 26 }
+    };
+    const lunarDate = lunarNewYearDates[year];
+    if (lunarDate && month === lunarDate.month && day >= lunarDate.day - 1 && day <= lunarDate.day + 1) {
+      return "Happy Lunar New Year!";
+    }
+    
+    // Presidents' Day (3rd Monday of February)
+    if (month === 1) {
+      const presidentsDayDay = getNthWeekdayOfMonth(year, 1, 1, 3); // 1=Monday
+      if (day === presidentsDayDay) return "Happy Presidents' Day!";
+    }
+    
+    // Easter (calculated)
+    const easter = calculateEaster(year);
+    if (month === easter.month && day === easter.day) return "Happy Easter!";
+    
+    // Memorial Day (Last Monday of May)
+    if (month === 4) {
+      const memorialDay = getLastWeekdayOfMonth(year, 4, 1); // 1=Monday
+      if (day === memorialDay) return "Happy Memorial Day!";
+    }
+    
+    // Father's Day (3rd Sunday of June)
+    if (month === 5) {
+      const fathersDayDay = getNthWeekdayOfMonth(year, 5, 0, 3); // 0=Sunday
+      if (day === fathersDayDay) return "Happy Father's Day!";
+    }
+    
+    // Labor Day (1st Monday of September)
+    if (month === 8) {
+      const laborDayDay = getNthWeekdayOfMonth(year, 8, 1, 1); // 1=Monday
+      if (day === laborDayDay) return "Happy Labor Day!";
+    }
+    
+    // Thanksgiving (4th Thursday of November)
+    if (month === 10) {
+      const thanksgivingDay = getNthWeekdayOfMonth(year, 10, 4, 4); // 4=Thursday
+      if (day === thanksgivingDay) return "Happy Thanksgiving!";
+    }
+    
+    // PRIORITY 3: Check date ranges (multi-day events)
+    
+    // March Madness (March 15 - April 10)
+    if ((month === 2 && day >= 15) || (month === 3 && day <= 10)) {
+      return "Happy March Madness!";
+    }
+    
+    // PRIORITY 4: Check month-long greetings (least specific)
+    
+    // Happy Holidays (entire December, but not on specific holidays already handled)
+    if (month === 11) return "Happy Holidays!";
+    
+    // No holiday greeting for today
+    return null;
+    
+  } catch (error) {
+    console.warn('Error getting holiday greeting:', error.message);
+    return null;
+  }
+}
+
+// ============================================================================
+// SPORTS EVENTS FUNCTIONS - ESPN API Integration
+// ============================================================================
+
+// Helper function to fetch all teams for a specific sport from ESPN
+async function fetchAllTeamsForSport(sport) {
+  const sportMap = {
+    'nfl': 'football/nfl',
+    'nba': 'basketball/nba',
+    'mlb': 'baseball/mlb',
+    'nhl': 'hockey/nhl'
+  };
+  
+  const sportPath = sportMap[sport.toLowerCase()];
+  if (!sportPath) {
+    console.warn(`Unknown sport: ${sport}`);
+    return [];
+  }
+  
+  const url = `https://site.api.espn.com/apis/site/v2/sports/${sportPath}/teams`;
+  console.log(`Fetching teams from ESPN for ${sport}: ${url}`);
+  
+  try {
+    const https = require('https');
+    const response = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('ESPN API timeout'));
+      }, 5000); // 5 second timeout
+      
+      https.get(url, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          clearTimeout(timeout);
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(new Error('Invalid JSON from ESPN'));
+          }
+        });
+      }).on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+    
+    // Parse teams from ESPN response structure
+    if (response.sports && response.sports[0].leagues && response.sports[0].leagues[0].teams) {
+      const teams = response.sports[0].leagues[0].teams;
+      
+      const parsedTeams = teams.map(t => ({
+        id: t.team.id,
+        slug: t.team.abbreviation.toLowerCase(),
+        name: t.team.displayName,
+        location: t.team.location,
+        sport: sport.toUpperCase()
+      }));
+      
+      console.log(`Fetched ${parsedTeams.length} ${sport.toUpperCase()} teams from ESPN`);
+      return parsedTeams;
+    }
+    
+    console.warn(`No teams found in ESPN response for ${sport}`);
+    return [];
+  } catch (error) {
+    console.error(`Error fetching ${sport} teams from ESPN:`, error.message);
+    return [];
+  }
+}
+
+// Helper function to fetch all teams from ESPN (no caching for fresh data)
+async function getAllTeamsFromESPN() {
+  console.log('Fetching all teams from ESPN API (fresh data)...');
+  
+  const sports = ['nfl', 'nba', 'mlb', 'nhl']; // Only major 4 sports, no MLS
+  const allTeams = [];
+  
+  // Fetch all sports in parallel for speed
+  const promises = sports.map(sport => fetchAllTeamsForSport(sport));
+  const results = await Promise.all(promises);
+  
+  results.forEach(teams => allTeams.push(...teams));
+  
+  console.log(`Fetched ${allTeams.length} total teams from ESPN`);
+  return allTeams;
+}
+
+// Helper function to find teams by city name
+function findTeamsByCity(allTeams, cityName) {
+  const normalizedCity = cityName.toLowerCase().trim();
+  
+  const matches = allTeams.filter(team => {
+    const teamLocation = team.location.toLowerCase();
+    
+    // Exact match
+    if (teamLocation === normalizedCity) return true;
+    
+    // Partial match (handles "Washington" vs "Washington D.C.")
+    if (teamLocation.includes(normalizedCity) || normalizedCity.includes(teamLocation)) {
+      return true;
+    }
+    
+    // Handle special cases
+    if (normalizedCity === 'dc' && teamLocation.includes('washington')) return true;
+    if (normalizedCity === 'la' && teamLocation.includes('los angeles')) return true;
+    if (normalizedCity === 'sf' && teamLocation.includes('san francisco')) return true;
+    if (normalizedCity === 'ny' && teamLocation.includes('new york')) return true;
+    
+    return false;
+  });
+  
+  console.log(`Found ${matches.length} teams in ${cityName}: ${matches.map(t => t.name).join(', ')}`);
+  return matches;
+}
+
+// Helper function to fetch upcoming games for a team from ESPN
+async function getUpcomingGamesFromESPN(sport, teamSlug, daysAhead = 7) {
+  const sportMap = {
+    'nfl': 'football/nfl',
+    'nba': 'basketball/nba',
+    'mlb': 'baseball/mlb',
+    'nhl': 'hockey/nhl'
+  };
+  
+  const sportPath = sportMap[sport.toLowerCase()];
+  if (!sportPath) {
+    console.warn(`Unknown sport for schedule: ${sport}`);
+    return [];
+  }
+  
+  const url = `https://site.api.espn.com/apis/site/v2/sports/${sportPath}/teams/${teamSlug}/schedule`;
+  
+  try {
+    const https = require('https')
+    const response = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('ESPN schedule timeout'));
+      }, 5000);
+      
+      https.get(url, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          clearTimeout(timeout);
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(new Error('Invalid JSON from ESPN schedule'));
+          }
+        });
+      }).on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+    
+    const now = new Date();
+    const futureDate = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
+    const upcomingGames = [];
+    
+    if (response.events && Array.isArray(response.events)) {
+      for (const event of response.events) {
+        const gameDate = new Date(event.date);
+        
+        // Only include upcoming games in the next 'daysAhead' days
+        if (gameDate >= now && gameDate <= futureDate) {
+          const competitors = event.competitions[0].competitors;
+          const homeTeam = competitors.find(c => c.homeAway === 'home');
+          const awayTeam = competitors.find(c => c.homeAway === 'away');
+          
+          const ourTeamIsHome = homeTeam?.team.abbreviation.toLowerCase() === teamSlug.toLowerCase();
+          const opponent = ourTeamIsHome ? awayTeam : homeTeam;
+          
+          upcomingGames.push({
+            date: gameDate,
+            opponent: opponent?.team.displayName || 'TBD',
+            isHome: ourTeamIsHome,
+            time: event.date
+          });
+        }
+      }
+    }
+    
+    console.log(`Found ${upcomingGames.length} upcoming games for ${teamSlug}`);
+    return upcomingGames;
+    
+  } catch (error) {
+    console.error(`Error fetching schedule for ${teamSlug}:`, error.message);
+    return [];
+  }
+}
+
+// Helper function to format games for agent with full context
+function formatUpcomingGamesForAgent(games, timeZone) {
+  if (!games || games.length === 0) {
+    return '';
+  }
+  
+  const formatted = games.map(game => {
+    // ESPN returns times in UTC, convert to restaurant's timezone
+    const gameDate = new Date(game.time); // This is UTC
+    
+    // Get day name in restaurant's timezone
+    const dayOfWeek = gameDate.toLocaleString('en-US', {
+      weekday: 'long',
+      timeZone: timeZone
+    });
+    
+    // Get date (MM/DD) in restaurant's timezone
+    const month = parseInt(gameDate.toLocaleString('en-US', {
+      month: 'numeric',
+      timeZone: timeZone
+    }));
+    const day = parseInt(gameDate.toLocaleString('en-US', {
+      day: 'numeric',
+      timeZone: timeZone
+    }));
+    const dateStr = `${month}/${day}`;
+    
+    // Get time in restaurant's timezone
+    const timeStr = gameDate.toLocaleString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit',
+      hour12: true,
+      timeZone: timeZone
+    });
+    
+    const vs = game.isHome ? 'vs' : 'at';
+    
+    // Format: "Washington Wizards play Sunday (12/28) 8:15 PM vs Dallas Cowboys"
+    return `${game.teamName} play ${dayOfWeek} (${dateStr}) ${timeStr} ${vs} ${game.opponent}`;
+  });
+  
+  return formatted.join('. ') + '.';
+}
+
 // Helper function to get upcoming holidays within the next N days
 function getUpcomingHolidays(holidayHours, timeZone, daysAhead = 14) {
   if (!holidayHours || !Array.isArray(holidayHours) || holidayHours.length === 0) {
@@ -401,6 +815,87 @@ module.exports.handleInboundCall = async (event) => {
       console.warn('Holiday hours formatting failed:', error.message);
     }
 
+    // Step 6: Check for holiday greeting if enabled
+    let finalGreeting = restaurantData?.greetingPhrase || '';
+    if (restaurantData?.holidayGreetings === true) {
+      try {
+        const holidayGreeting = getHolidayGreeting(timeZone);
+        if (holidayGreeting) {
+          finalGreeting = `${holidayGreeting} ${finalGreeting}`;
+          console.log(`Holiday greeting applied: ${holidayGreeting}`);
+        }
+      } catch (error) {
+        console.warn('Holiday greeting check failed:', error.message);
+      }
+    }
+
+    // Step 7: Get upcoming sports events from ESPN if configured
+    let upcomingSportsEvents = '';
+    if (restaurantData?.sportsTeams && Array.isArray(restaurantData.sportsTeams) && restaurantData.sportsTeams.length > 0) {
+      try {
+        console.log(`Fetching sports events for cities: ${restaurantData.sportsTeams.join(', ')}`);
+        
+        // Fetch all teams from ESPN (uses cache)
+        const allTeams = await getAllTeamsFromESPN();
+        
+        const allGames = [];
+        
+        // For each city the restaurant cares about
+        for (const cityName of restaurantData.sportsTeams) {
+          // Find all teams in that city
+          const cityTeams = findTeamsByCity(allTeams, cityName);
+          
+          // Fetch schedules for each team
+          for (const team of cityTeams) {
+            const games = await getUpcomingGamesFromESPN(team.sport, team.slug, 7);
+            
+            // Add team context to each game
+            games.forEach(game => {
+              allGames.push({
+                ...game,
+                teamName: team.name,
+                sport: team.sport
+              });
+            });
+          }
+        }
+        
+        console.log(`Found ${allGames.length} total upcoming games across all teams`);
+        
+        // Group games by sport and take only the earliest game from each sport
+        const gamesBySport = {};
+        for (const game of allGames) {
+          if (!gamesBySport[game.sport]) {
+            gamesBySport[game.sport] = [];
+          }
+          gamesBySport[game.sport].push(game);
+        }
+        
+        // Take earliest game from each sport
+        const selectedGames = [];
+        for (const sport of ['NFL', 'NBA', 'NHL', 'MLB']) {
+          if (gamesBySport[sport] && gamesBySport[sport].length > 0) {
+            // Sort by date and take first
+            gamesBySport[sport].sort((a, b) => new Date(a.time) - new Date(b.time));
+            selectedGames.push(gamesBySport[sport][0]);
+          }
+        }
+        
+        console.log(`Selected ${selectedGames.length} games (one per sport)`);
+        
+        // Sort selected games by date
+        selectedGames.sort((a, b) => new Date(a.time) - new Date(b.time));
+        
+        if (selectedGames.length > 0) {
+          upcomingSportsEvents = formatUpcomingGamesForAgent(selectedGames, timeZone);
+          console.log('Upcoming sports events formatted:', upcomingSportsEvents);
+        }
+        
+      } catch (error) {
+        console.warn('Sports events lookup failed:', error.message);
+      }
+    }
+
     // Return the response with enhanced dynamic variables
     const response = {
       call_inbound: {
@@ -410,17 +905,28 @@ module.exports.handleInboundCall = async (event) => {
           restaurant_address: restaurantData?.address || 'Address not available',
           location_id: locationData?.locationId || '',
           transfer_number: restaurantData?.transferNumber || '',
-          greeting_phrase: restaurantData?.greetingPhrase || '',
+          greeting_phrase: finalGreeting,
           menu_item_names: menuItemNames?.join(', ') || 'Menu not available',
           store_status: storeInfo?.status || 'Store status unavailable',
           store_hours: storeInfo?.allHours || 'Hours not available',
-          holiday_hours: holidayHoursFormatted
+          holiday_hours: holidayHoursFormatted,
+          upcoming_sports_events: upcomingSportsEvents || 'No upcoming games scheduled'
         },
         metadata: {
           request_timestamp: new Date().toISOString()
         }
       }
     };
+
+    // Add knowledge base override if kbID exists for this location
+    if (restaurantData?.kbID) {
+      response.call_inbound.agent_override = {
+        retell_llm: {
+          knowledge_base_ids: [restaurantData.kbID]
+        }
+      };
+      console.log(`Knowledge base override applied: ${restaurantData.kbID}`);
+    }
 
     console.log('Final dynamic variables payload:', JSON.stringify(response.call_inbound.dynamic_variables, null, 2));
     console.log('Returning response with menu items:', JSON.stringify(response, null, 2));
